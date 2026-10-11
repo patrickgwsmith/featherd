@@ -1,0 +1,6 @@
+/featherd
+/data/
+*.sqlite3-wal
+*.sqlite3-shm
+*.sqlite3-journal
+.DS_Store
