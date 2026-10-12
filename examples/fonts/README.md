@@ -32,7 +32,7 @@ fonts bucket  →  data/fonts.sqlite3
 ## Try it with Inter 4.1
 
 ```sh
-go run . -dir data &
+go run . --dir data &
 
 curl -LO https://github.com/rsms/inter/releases/download/v4.1/Inter-4.1.zip
 unzip -q Inter-4.1.zip -d Inter-4.1

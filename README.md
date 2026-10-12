@@ -126,15 +126,20 @@ directory.
 
 ```sh
 go run . \
-  -addr 127.0.0.1:8333 \
-  -dir data
+  --addr 127.0.0.1:8333 \
+  --dir data
 ```
 
 Set a smaller cap while testing:
 
 ```sh
-go run . -max-object-bytes 10485760
+go run . --max-object-bytes 10485760
 ```
+
+Long options take two dashes, with the value after a space or `=`
+(`--dir data` and `--dir=data` are the same). A single dash groups one-letter
+flags, so `-addr` is rejected as `unknown option -a`. Run `go run . -h` for the
+full list.
 
 ## Examples
 

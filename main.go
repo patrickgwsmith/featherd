@@ -19,7 +19,6 @@ import (
 	"encoding/hex"
 	"encoding/xml"
 	"errors"
-	"flag"
 	"fmt"
 	"hash/crc32"
 	"hash/crc64"
@@ -1503,20 +1502,99 @@ func newHandler(buckets Buckets) http.Handler {
 	})
 }
 
-func main() {
-	addr := flag.String("addr", "127.0.0.1:8333", "listen address")
-	dataDir := flag.String("dir", "data", "directory holding one sqlite database per bucket")
-	maxObjectBytes := flag.Int64("max-object-bytes", defaultMaxObjectBytes, "maximum object size in bytes")
-	flag.Parse()
+const usage = `usage: featherd [options]
 
-	dir, err := OpenDir(*dataDir, *maxObjectBytes)
+  --addr ADDR              listen address (default 127.0.0.1:8333)
+  --dir DIR                directory holding one sqlite database per bucket (default data)
+  --max-object-bytes N     maximum object size in bytes (default 20971520)
+  -h, --help               show this help
+`
+
+type options struct {
+	addr           string
+	dir            string
+	maxObjectBytes int64
+	help           bool
+}
+
+// parseArgs parses GNU-style options: long options take two dashes and a
+// value as --name=value or --name value; a single dash introduces a cluster
+// of one-letter boolean options, so -abc means -a -b -c.
+func parseArgs(args []string) (options, error) {
+	opts := options{addr: "127.0.0.1:8333", dir: "data", maxObjectBytes: defaultMaxObjectBytes}
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		switch {
+		case arg == "--":
+			if i+1 < len(args) {
+				return opts, fmt.Errorf("unexpected argument %q", args[i+1])
+			}
+		case strings.HasPrefix(arg, "--"):
+			name, value, hasValue := strings.Cut(arg[2:], "=")
+			if name == "help" {
+				if hasValue {
+					return opts, fmt.Errorf("option --help does not take a value")
+				}
+				opts.help = true
+				continue
+			}
+			if name != "addr" && name != "dir" && name != "max-object-bytes" {
+				return opts, fmt.Errorf("unknown option --%s", name)
+			}
+			if !hasValue {
+				if i+1 >= len(args) {
+					return opts, fmt.Errorf("option --%s requires a value", name)
+				}
+				i++
+				value = args[i]
+			}
+			switch name {
+			case "addr":
+				opts.addr = value
+			case "dir":
+				opts.dir = value
+			case "max-object-bytes":
+				n, err := strconv.ParseInt(value, 10, 64)
+				if err != nil || n <= 0 {
+					return opts, fmt.Errorf("option --max-object-bytes needs a positive integer, got %q", value)
+				}
+				opts.maxObjectBytes = n
+			}
+		case strings.HasPrefix(arg, "-") && arg != "-":
+			for _, c := range arg[1:] {
+				switch c {
+				case 'h':
+					opts.help = true
+				default:
+					return opts, fmt.Errorf("unknown option -%c", c)
+				}
+			}
+		default:
+			return opts, fmt.Errorf("unexpected argument %q", arg)
+		}
+	}
+	return opts, nil
+}
+
+func main() {
+	opts, err := parseArgs(os.Args[1:])
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "featherd: %v\n\n%s", err, usage)
+		os.Exit(2)
+	}
+	if opts.help {
+		fmt.Print(usage)
+		return
+	}
+
+	dir, err := OpenDir(opts.dir, opts.maxObjectBytes)
 	if err != nil {
 		panic(err)
 	}
 	defer dir.Close()
 
-	fmt.Printf("featherd listening on http://%s using %s/<bucket>.sqlite3\n", *addr, *dataDir)
-	panic(http.ListenAndServe(*addr, newHandler(dir)))
+	fmt.Printf("featherd listening on http://%s using %s/<bucket>.sqlite3\n", opts.addr, opts.dir)
+	panic(http.ListenAndServe(opts.addr, newHandler(dir)))
 }
 
 func writeStoreResult(w http.ResponseWriter, r *http.Request, obj Object, err error) {

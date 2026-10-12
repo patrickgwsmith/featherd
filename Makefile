@@ -10,7 +10,7 @@ vet:
 	go vet ./...
 
 run: build
-	./featherd -addr 127.0.0.1:8333 -dir data
+	./featherd --addr 127.0.0.1:8333 --dir data
 
 clean:
 	rm -f featherd
