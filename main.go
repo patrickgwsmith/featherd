@@ -1615,6 +1615,9 @@ func parseArgs(args []string) (options, error) {
 				i++
 				value = args[i]
 			}
+			if value == "" {
+				return opts, fmt.Errorf("option --%s requires a non-empty value", name)
+			}
 			switch name {
 			case "addr":
 				opts.addr = value
