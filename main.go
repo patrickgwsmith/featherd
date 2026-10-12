@@ -13,6 +13,7 @@ import (
 	"crypto/md5"
 	"crypto/sha1"
 	"crypto/sha256"
+	_ "embed"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
@@ -57,6 +58,9 @@ var (
 	errSHA256Mismatch     = errors.New("payload does not match x-amz-content-sha256")
 )
 
+//go:embed schema.sql
+var defaultSchema []byte
+
 // checksumMismatch is the algorithm, e.g. "SHA256", of an x-amz-checksum-*
 // value that the body does not match.
 type checksumMismatch string
@@ -73,7 +77,6 @@ func (m invalidRequest) Error() string { return string(m) }
 type Store struct {
 	db             *C.sqlite3
 	path           string
-	schema         []byte
 	writable       bool
 	maxObjectBytes int64
 	mu             sync.Mutex
@@ -190,10 +193,9 @@ type listContent struct {
 
 // OpenStore opens the existing database at path, a SQLite Archive or an
 // empty file, read-only. The first write reopens it read-write and applies
-// schema, which must create the sqlar and content_meta tables and content_meta's
-// triggers, so a bucket that is only read is never modified.
-func OpenStore(path string, schema []byte) (*Store, error) {
-	s := &Store{path: path, schema: schema, maxObjectBytes: defaultMaxObjectBytes}
+// the embedded schema, so a bucket that is only read is never modified.
+func OpenStore(path string) (*Store, error) {
+	s := &Store{path: path, maxObjectBytes: defaultMaxObjectBytes}
 	if err := s.openLocked(false); err != nil {
 		return nil, err
 	}
@@ -312,7 +314,7 @@ func (s *Store) beginWriteLocked() (err error) {
 	if err := s.exec("DROP TABLE IF EXISTS content_meta"); err != nil {
 		return err
 	}
-	if err := s.exec(string(s.schema)); err != nil {
+	if err := s.exec(string(defaultSchema)); err != nil {
 		return err
 	}
 	if err := s.inspectLocked(); err != nil {
@@ -329,17 +331,16 @@ func (s *Store) beginWriteLocked() (err error) {
 // names: lowercase letters, digits, '.' and '-', with no leading '.' and no "..".
 type Dir struct {
 	path           string
-	schema         []byte
 	maxObjectBytes int64
 	mu             sync.Mutex
 	stores         map[string]*Store
 }
 
-func OpenDir(path string, schema []byte, maxObjectBytes int64) (*Dir, error) {
+func OpenDir(path string, maxObjectBytes int64) (*Dir, error) {
 	if err := os.MkdirAll(path, 0o755); err != nil {
 		return nil, err
 	}
-	return &Dir{path: path, schema: schema, maxObjectBytes: maxObjectBytes, stores: map[string]*Store{}}, nil
+	return &Dir{path: path, maxObjectBytes: maxObjectBytes, stores: map[string]*Store{}}, nil
 }
 
 // Store returns the bucket's database. As in S3, a bucket must be created
@@ -391,7 +392,7 @@ func (d *Dir) bucketPath(bucket string) string {
 }
 
 func (d *Dir) openLocked(bucket, path string) (*Store, error) {
-	s, err := OpenStore(path, d.schema)
+	s, err := OpenStore(path)
 	if err != nil {
 		return nil, err
 	}
@@ -1505,15 +1506,10 @@ func newHandler(buckets Buckets) http.Handler {
 func main() {
 	addr := flag.String("addr", "127.0.0.1:8333", "listen address")
 	dataDir := flag.String("dir", "data", "directory holding one sqlite database per bucket")
-	schemaPath := flag.String("schema", "schema.sql", "schema path")
 	maxObjectBytes := flag.Int64("max-object-bytes", defaultMaxObjectBytes, "maximum object size in bytes")
 	flag.Parse()
 
-	schema, err := os.ReadFile(*schemaPath)
-	if err != nil {
-		panic(err)
-	}
-	dir, err := OpenDir(*dataDir, schema, *maxObjectBytes)
+	dir, err := OpenDir(*dataDir, *maxObjectBytes)
 	if err != nil {
 		panic(err)
 	}

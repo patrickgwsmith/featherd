@@ -33,15 +33,6 @@ func newTestStore(t *testing.T) *Store {
 	return store
 }
 
-func readSchema(t testing.TB) []byte {
-	t.Helper()
-	schema, err := os.ReadFile("schema.sql")
-	if err != nil {
-		t.Fatal(err)
-	}
-	return schema
-}
-
 // openTestStoreAt opens the database at path, creating an empty one if needed.
 func openTestStoreAt(t testing.TB, path string) *Store {
 	t.Helper()
@@ -50,7 +41,7 @@ func openTestStoreAt(t testing.TB, path string) *Store {
 		t.Fatal(err)
 	}
 	f.Close()
-	store, err := OpenStore(path, readSchema(t))
+	store, err := OpenStore(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -85,7 +76,7 @@ func mustCreateBucket(t *testing.T, handler http.Handler, bucket string) {
 func newTestDir(t *testing.T) (*Dir, string) {
 	t.Helper()
 	path := t.TempDir()
-	dir, err := OpenDir(path, readSchema(t), defaultMaxObjectBytes)
+	dir, err := OpenDir(path, defaultMaxObjectBytes)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -269,9 +260,8 @@ func TestConcurrentCreateBucketSingleWinner(t *testing.T) {
 }
 
 func TestDirReopensBucketDatabases(t *testing.T) {
-	schema := readSchema(t)
 	path := t.TempDir()
-	dir, err := OpenDir(path, schema, defaultMaxObjectBytes)
+	dir, err := OpenDir(path, defaultMaxObjectBytes)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -285,7 +275,7 @@ func TestDirReopensBucketDatabases(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	dir, err = OpenDir(path, schema, defaultMaxObjectBytes)
+	dir, err = OpenDir(path, defaultMaxObjectBytes)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -121,6 +121,9 @@ against real clients, and only then expanding the contract.
 
 ## Run
 
+The schema is embedded in the executable, so it can run outside the source
+directory.
+
 ```sh
 go run . \
   -addr 127.0.0.1:8333 \
