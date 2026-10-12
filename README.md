@@ -31,6 +31,11 @@ featherd currently supports:
   `PUT` are rejected with 501 rather than ignored)
 - `If-Match: "<etag>"` for compare-and-swap writes and deletes
 - `If-Match: *` for update-if-present writes and deletes
+- conditional `GET` and `HEAD`: `If-Match` (`*` or a list of ETags) returns
+  412 `PreconditionFailed` when nothing matches, and `If-None-Match` (`*` or a
+  list of ETags, weak `W/"…"` allowed) returns 304 Not Modified, with the
+  object's `ETag` and `Last-Modified`, when one does. They are checked before
+  `Range` and before any data is read
 - single byte-range reads with `Range: bytes=start-end`, which read only the
   requested bytes from SQLite (except for zlib-compressed entries, below)
 - `Content-MD5`, hex `x-amz-content-sha256` and base64 `x-amz-checksum-*`
@@ -113,7 +118,8 @@ Missing pieces include:
 - SigV4 authentication, including presigned URL signature verification
 - delimiters/common prefixes
 - multipart upload
-- full conditional read semantics
+- `If-Modified-Since` and `If-Unmodified-Since` (ignored, so the read
+  proceeds as if they were absent)
 - bucket management APIs other than `CreateBucket`
 
 The goal is to grow compatibility by declaring a small subset, testing it

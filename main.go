@@ -51,6 +51,7 @@ var (
 	errBucketExists       = errors.New("bucket already exists")
 	errMalformedXML       = errors.New("malformed XML")
 	errPreconditionFailed = errors.New("precondition failed")
+	errNotModified        = errors.New("not modified")
 	errObjectTooLarge     = errors.New("object too large")
 	errInvalidRange       = errors.New("invalid range")
 	errBadDigest          = errors.New("payload does not match Content-MD5")
@@ -501,6 +502,13 @@ func (s *Store) Get(bucket, key string) (Object, error) {
 // is errInvalidRange, returned with the object's metadata. A compressed entry
 // ignores rangeHeader and is always returned whole.
 func (s *Store) GetRange(bucket, key, rangeHeader string) (obj Object, start, end int, partial bool, err error) {
+	return s.GetRangeIf(bucket, key, rangeHeader, conditions{})
+}
+
+// GetRangeIf is GetRange that first checks cond against the object, before
+// reading any of its data. A failed condition is errPreconditionFailed or
+// errNotModified, returned with the object's metadata.
+func (s *Store) GetRangeIf(bucket, key, rangeHeader string, cond conditions) (obj Object, start, end int, partial bool, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := s.readyLocked(); err != nil {
@@ -518,6 +526,16 @@ func (s *Store) GetRange(bucket, key, rangeHeader string) (obj Object, start, en
 	}
 	obj = e.Object
 	obj.Bucket = bucket
+	if cond != (conditions{}) {
+		if obj.ETag == "" {
+			if obj.ETag, err = s.etagLocked(e); err != nil {
+				return Object{}, 0, 0, false, err
+			}
+		}
+		if err := cond.check(obj.ETag); err != nil {
+			return obj, 0, 0, false, err
+		}
+	}
 	if obj.Compressed {
 		rangeHeader = ""
 	}
@@ -954,10 +972,56 @@ func quoteETag(body []byte) string {
 	return etagOf(sum[:])
 }
 
-// etagMatches reports whether an If-Match header value matches an existing
-// object's ETag. "*" matches any existing object.
+// etagMatches reports whether an If-Match header value, "*" or a
+// comma-separated list of ETags, matches an existing object's ETag. Weak
+// ETags (W/"...") never match, as If-Match uses the strong comparison.
 func etagMatches(ifMatch, etag string) bool {
-	return ifMatch == "*" || ifMatch == etag
+	return etagListMatches(ifMatch, etag, false)
+}
+
+// etagListMatches reports whether header, "*" or a comma-separated list of
+// ETags, matches etag. weak allows W/"..." tags to match, for If-None-Match.
+// Unquoted ETags are accepted, as S3 does.
+func etagListMatches(header, etag string, weak bool) bool {
+	want := strings.Trim(etag, `"`)
+	for _, tag := range strings.Split(header, ",") {
+		tag = strings.TrimSpace(tag)
+		if tag == "*" {
+			return true
+		}
+		if strings.HasPrefix(tag, "W/") {
+			if !weak {
+				continue
+			}
+			tag = tag[2:]
+		}
+		if tag != "" && strings.Trim(tag, `"`) == want {
+			return true
+		}
+	}
+	return false
+}
+
+// conditions holds a GET or HEAD request's If-Match and If-None-Match
+// header values, "" if absent.
+type conditions struct {
+	ifMatch, ifNoneMatch string
+}
+
+func requestConditions(r *http.Request) conditions {
+	return conditions{ifMatch: r.Header.Get("If-Match"), ifNoneMatch: r.Header.Get("If-None-Match")}
+}
+
+// check returns errPreconditionFailed if If-Match doesn't match etag, or
+// else errNotModified if If-None-Match does, as S3 does for GET and HEAD.
+func (c conditions) check(etag string) error {
+	if c.ifMatch != "" && !etagMatches(c.ifMatch, etag) {
+		return errPreconditionFailed
+	}
+	if c.ifNoneMatch != "" && etagListMatches(c.ifNoneMatch, etag, true) {
+		return errNotModified
+	}
+	return nil
 }
 
 func prefixUpperBound(prefix string) string {
@@ -1456,6 +1520,9 @@ func newHandler(buckets Buckets) http.Handler {
 			writeStoreResult(w, r, obj, err)
 		case http.MethodHead:
 			obj, err := store.Head(bucket, key)
+			if err == nil {
+				err = requestConditions(r).check(obj.ETag)
+			}
 			if err != nil {
 				writeStoreResult(w, r, obj, err)
 				return
@@ -1467,7 +1534,7 @@ func newHandler(buckets Buckets) http.Handler {
 			w.Header().Set("Content-Length", fmt.Sprint(obj.Size))
 			w.WriteHeader(http.StatusOK)
 		case http.MethodGet:
-			obj, start, end, partial, err := store.GetRange(bucket, key, r.Header.Get("Range"))
+			obj, start, end, partial, err := store.GetRangeIf(bucket, key, r.Header.Get("Range"), requestConditions(r))
 			if errors.Is(err, errInvalidRange) {
 				w.Header().Set("Content-Range", fmt.Sprintf("bytes */%d", obj.Size))
 				writeError(w, r, http.StatusRequestedRangeNotSatisfiable, "InvalidRange", "The requested range is not satisfiable")
@@ -1616,6 +1683,11 @@ func writeStoreResult(w http.ResponseWriter, r *http.Request, obj Object, err er
 		writeError(w, r, http.StatusBadRequest, "MalformedXML", "The XML you provided was not well-formed or did not validate against our published schema.")
 	case errors.Is(err, errPreconditionFailed):
 		writeError(w, r, http.StatusPreconditionFailed, "PreconditionFailed", "At least one of the pre-conditions you specified did not hold")
+	case errors.Is(err, errNotModified):
+		// Like S3, a 304 has the object's validators but no body.
+		w.Header().Set("ETag", obj.ETag)
+		w.Header().Set("Last-Modified", lastModifiedHeader(obj))
+		w.WriteHeader(http.StatusNotModified)
 	case errors.Is(err, errObjectTooLarge):
 		// S3 reports EntityTooLarge as 400, not 413.
 		writeError(w, r, http.StatusBadRequest, "EntityTooLarge", "Your proposed upload exceeds the maximum allowed size")

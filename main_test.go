@@ -828,6 +828,99 @@ func TestPutRejectsIfNoneMatchETag(t *testing.T) {
 	}
 }
 
+func TestConditionalGetAndHead(t *testing.T) {
+	store := newTestStore(t)
+	put, err := store.Put("bkt", "k", []byte("hello"), "text/plain", nil, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	etag := put.ETag
+	bare := strings.Trim(etag, `"`)
+	other := quoteETag([]byte("other"))
+	handler := newHandler(singleStore(store))
+	for _, tc := range []struct {
+		name                 string
+		ifMatch, ifNoneMatch string
+		rng                  string
+		want                 int
+	}{
+		{"none", "", "", "", http.StatusOK},
+		{"match", etag, "", "", http.StatusOK},
+		{"match star", "*", "", "", http.StatusOK},
+		{"match list", other + ", " + etag, "", "", http.StatusOK},
+		{"match unquoted", bare, "", "", http.StatusOK},
+		{"match mismatch", other, "", "", http.StatusPreconditionFailed},
+		{"match weak", "W/" + etag, "", "", http.StatusPreconditionFailed},
+		{"none-match", "", etag, "", http.StatusNotModified},
+		{"none-match star", "", "*", "", http.StatusNotModified},
+		{"none-match list", "", other + "," + etag, "", http.StatusNotModified},
+		{"none-match weak", "", "W/" + etag, "", http.StatusNotModified},
+		{"none-match other", "", other, "", http.StatusOK},
+		{"both hold", etag, other, "", http.StatusOK},
+		{"if-match first", other, etag, "", http.StatusPreconditionFailed},
+		{"before range", "", etag, "bytes=1-2", http.StatusNotModified},
+		{"before bad range", other, "", "bytes=99-", http.StatusPreconditionFailed},
+		{"range", etag, other, "bytes=1-2", http.StatusPartialContent},
+	} {
+		for _, method := range []string{http.MethodGet, http.MethodHead} {
+			req := httptest.NewRequest(method, "/bkt/k", nil)
+			if tc.ifMatch != "" {
+				req.Header.Set("If-Match", tc.ifMatch)
+			}
+			if tc.ifNoneMatch != "" {
+				req.Header.Set("If-None-Match", tc.ifNoneMatch)
+			}
+			if tc.rng != "" {
+				req.Header.Set("Range", tc.rng)
+			}
+			resp := httptest.NewRecorder()
+			handler.ServeHTTP(resp, req)
+			want := tc.want
+			if method == http.MethodHead && want == http.StatusPartialContent {
+				want = http.StatusOK // HEAD ignores Range
+			}
+			if resp.Code != want {
+				t.Errorf("%s %s: status = %d, want %d", method, tc.name, resp.Code, want)
+				continue
+			}
+			switch want {
+			case http.StatusNotModified:
+				if resp.Body.Len() != 0 || resp.Header().Get("ETag") != etag || resp.Header().Get("Last-Modified") != lastModifiedHeader(put) {
+					t.Errorf("%s %s: 304 body %q headers %v", method, tc.name, resp.Body, resp.Header())
+				}
+			case http.StatusPreconditionFailed:
+				if method == http.MethodGet && !strings.Contains(resp.Body.String(), "<Code>PreconditionFailed</Code>") {
+					t.Errorf("%s %s: body %q", method, tc.name, resp.Body)
+				}
+			}
+		}
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/bkt/missing", nil)
+	req.Header.Set("If-None-Match", "*")
+	resp := httptest.NewRecorder()
+	handler.ServeHTTP(resp, req)
+	if resp.Code != http.StatusNotFound {
+		t.Fatalf("missing key with If-None-Match: * status = %d, want 404", resp.Code)
+	}
+}
+
+func TestConditionalGetWithoutMetadata(t *testing.T) {
+	// An entry written by the sqlite3 CLI has no stored ETag, so it is
+	// computed from the data for the comparison.
+	store := newTestStore(t)
+	if _, err := store.Put("bkt", "k", []byte("hello"), "", nil, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.exec("DELETE FROM content_meta"); err != nil {
+		t.Fatal(err)
+	}
+	_, _, _, _, err := store.GetRangeIf("bkt", "k", "", conditions{ifNoneMatch: quoteETag([]byte("hello"))})
+	if !errors.Is(err, errNotModified) {
+		t.Fatalf("err = %v, want not modified", err)
+	}
+}
+
 func TestListLastModifiedHasMilliseconds(t *testing.T) {
 	store := newTestStore(t)
 	if _, err := store.Put("bkt", "k", []byte("x"), "", nil, false); err != nil {
