@@ -162,6 +162,8 @@ full list.
 
 - [`examples/fonts`](examples/fonts): store official font releases (e.g.
   Inter) and look files up by version or by SHA-256 digest.
+- [`examples/sqlar`](examples/sqlar): pack a directory into a bucket with
+  `sqlite3 -A`, serve and update it while featherd runs, and unpack it again.
 
 ## Test
 

@@ -3,8 +3,10 @@ package main
 import (
 	"bytes"
 	"compress/zlib"
+	"encoding/xml"
 	"errors"
 	"fmt"
+	"math/rand/v2"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -13,6 +15,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 func openSQLARStore(t testing.TB, path string) *Store {
@@ -197,13 +200,232 @@ func TestSQLARGetRange(t *testing.T) {
 	}
 }
 
-// TestSQLARExtractsWithSQLiteCLI checks that `sqlite3 -Ax` extracts what
-// featherd stored, byte for byte.
-func TestSQLARExtractsWithSQLiteCLI(t *testing.T) {
+// sqliteCLI returns the path of the sqlite3 command-line shell, or skips the
+// test if it isn't installed.
+func sqliteCLI(t *testing.T) string {
+	t.Helper()
 	cli, err := exec.LookPath("sqlite3")
 	if err != nil {
 		t.Skip("sqlite3 CLI not found")
 	}
+	return cli
+}
+
+// runSQLite runs the sqlite3 shell and returns its output.
+func runSQLite(t *testing.T, cli string, args ...string) string {
+	t.Helper()
+	out, err := exec.Command(cli, args...).CombinedOutput()
+	if err != nil {
+		t.Fatalf("sqlite3 %s: %v: %s", strings.Join(args, " "), err, out)
+	}
+	return string(out)
+}
+
+// writeTree writes files under dir, each with the modification time mtime.
+func writeTree(t *testing.T, dir string, files map[string][]byte, mtime int64) {
+	t.Helper()
+	for name, body := range files {
+		path := filepath.Join(dir, name)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, body, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(path, time.Unix(mtime, 0), time.Unix(mtime, 0)); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// noise returns n incompressible bytes, which `sqlite3 -A` stores as is.
+func noise(n int, seed byte) []byte {
+	buf := make([]byte, n)
+	_, _ = rand.NewChaCha8([32]byte{seed}).Read(buf)
+	return buf
+}
+
+// listKeys lists a bucket over HTTP and returns its keys and ETags.
+func listKeys(t *testing.T, handler http.Handler, bucket string) map[string]string {
+	t.Helper()
+	resp := serve(handler, http.MethodGet, "/"+bucket+"?list-type=2", nil)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("list %s = %d %q", bucket, resp.Code, resp.Body.String())
+	}
+	var result listBucketResult
+	if err := xml.Unmarshal(resp.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	keys := map[string]string{}
+	for _, c := range result.Contents {
+		keys[c.Key] = c.ETag
+	}
+	return keys
+}
+
+// TestServesArchiveFromSQLiteCLI serves an archive made by `sqlite3 -A -c`
+// and copied into the data directory as a bucket: every file is an object,
+// directories aren't, compressed and stored entries both read back exactly,
+// and nothing changes the file until the first write.
+func TestServesArchiveFromSQLiteCLI(t *testing.T) {
+	cli := sqliteCLI(t)
+	src := t.TempDir()
+	files := map[string][]byte{
+		"index.html":   []byte(strings.Repeat("<p>hello from sqlar</p>\n", 100)),
+		"css/site.css": []byte("body{}"),
+		"img/logo.bin": noise(64<<10, 1),
+		"empty":        nil,
+	}
+	writeTree(t, src, files, 1700000000)
+	dir, path := newTestDir(t)
+	archive := filepath.Join(path, "site.sqlite3")
+	runSQLite(t, cli, archive, "-A", "-c", "-C", src, "index.html", "css", "img", "empty")
+	if got := runSQLite(t, cli, archive, "SELECT name FROM sqlar WHERE length(data) < sz"); got != "index.html\n" {
+		t.Fatalf("compressed entries = %q, want index.html only", got)
+	}
+	before, err := os.ReadFile(archive)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	handler := newHandler(dir)
+	keys := listKeys(t, handler, "site")
+	if len(keys) != len(files) {
+		t.Fatalf("listed %v, want the %d files and no directories", keys, len(files))
+	}
+	for key, body := range files {
+		etag := quoteETag(body)
+		resp := serve(handler, http.MethodGet, "/site/"+key, nil)
+		if resp.Code != http.StatusOK || !bytes.Equal(resp.Body.Bytes(), body) || resp.Header().Get("ETag") != etag ||
+			resp.Header().Get("Content-Type") != "application/octet-stream" ||
+			resp.Header().Get("Last-Modified") != "Tue, 14 Nov 2023 22:13:20 GMT" {
+			t.Fatalf("get %s = %d, %d bytes, headers %v", key, resp.Code, resp.Body.Len(), resp.Header())
+		}
+		resp = serve(handler, http.MethodHead, "/site/"+key, nil)
+		if resp.Code != http.StatusOK || resp.Header().Get("ETag") != etag || resp.Header().Get("Content-Length") != fmt.Sprint(len(body)) {
+			t.Fatalf("head %s = %d, headers %v", key, resp.Code, resp.Header())
+		}
+		if keys[key] != etag {
+			t.Fatalf("listed %s with ETag %s, want %s", key, keys[key], etag)
+		}
+	}
+	for _, key := range []string{"css", "img"} {
+		if resp := serve(handler, http.MethodGet, "/site/"+key, nil); resp.Code != http.StatusNotFound {
+			t.Fatalf("get directory %s = %d", key, resp.Code)
+		}
+	}
+
+	// A range of a stored entry is read in part; a compressed one is sent whole.
+	logo := files["img/logo.bin"]
+	req := httptest.NewRequest(http.MethodGet, "/site/img/logo.bin", nil)
+	req.Header.Set("Range", "bytes=1000-1999")
+	resp := httptest.NewRecorder()
+	handler.ServeHTTP(resp, req)
+	if resp.Code != http.StatusPartialContent || !bytes.Equal(resp.Body.Bytes(), logo[1000:2000]) ||
+		resp.Header().Get("Content-Range") != fmt.Sprintf("bytes 1000-1999/%d", len(logo)) {
+		t.Fatalf("ranged get = %d, %d bytes, Content-Range %q", resp.Code, resp.Body.Len(), resp.Header().Get("Content-Range"))
+	}
+	req = httptest.NewRequest(http.MethodGet, "/site/index.html", nil)
+	req.Header.Set("Range", "bytes=0-9")
+	resp = httptest.NewRecorder()
+	handler.ServeHTTP(resp, req)
+	if resp.Code != http.StatusOK || !bytes.Equal(resp.Body.Bytes(), files["index.html"]) || resp.Header().Get("Accept-Ranges") != "none" {
+		t.Fatalf("ranged get of compressed = %d, %d bytes, Accept-Ranges %q", resp.Code, resp.Body.Len(), resp.Header().Get("Accept-Ranges"))
+	}
+	if resp := serve(handler, http.MethodDelete, "/site/missing", nil); resp.Code != http.StatusNoContent {
+		t.Fatalf("delete missing = %d", resp.Code)
+	}
+	if after, err := os.ReadFile(archive); err != nil || !bytes.Equal(after, before) {
+		t.Fatalf("archive changed by reads: %v", err)
+	}
+
+	// The first write adds featherd's metadata, and the archive still
+	// extracts with the sqlite3 shell, including the new object.
+	put := httptest.NewRequest(http.MethodPut, "/site/robots.txt", strings.NewReader("User-agent: *\n"))
+	put.Header.Set("Content-Type", "text/plain")
+	resp = httptest.NewRecorder()
+	handler.ServeHTTP(resp, put)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("put = %d %q", resp.Code, resp.Body.String())
+	}
+	if resp := serve(handler, http.MethodHead, "/site/robots.txt", nil); resp.Header().Get("Content-Type") != "text/plain" {
+		t.Fatalf("head robots.txt Content-Type = %q", resp.Header().Get("Content-Type"))
+	}
+	out := t.TempDir()
+	runSQLite(t, cli, archive, "-A", "-x", "-C", out)
+	files["robots.txt"] = []byte("User-agent: *\n")
+	for key, body := range files {
+		if got, err := os.ReadFile(filepath.Join(out, key)); err != nil || !bytes.Equal(got, body) {
+			t.Fatalf("extracted %s = %d bytes, %v; want %d bytes", key, len(got), err, len(body))
+		}
+	}
+}
+
+// TestServesArchiveUpdatedBySQLiteCLI changes an archive with the sqlite3
+// shell while featherd is serving it. Updated and added files are served at
+// once with ETags of their new data, even where featherd had stored metadata,
+// and recreating the archive replaces its objects.
+func TestServesArchiveUpdatedBySQLiteCLI(t *testing.T) {
+	cli := sqliteCLI(t)
+	src := t.TempDir()
+	writeTree(t, src, map[string][]byte{"a.txt": []byte("a v1"), "b.bin": noise(4096, 1)}, 1700000000)
+	dir, path := newTestDir(t)
+	archive := filepath.Join(path, "site.sqlite3")
+	runSQLite(t, cli, archive, "-A", "-c", "-C", src, "a.txt", "b.bin")
+
+	handler := newHandler(dir)
+	if resp := serve(handler, http.MethodGet, "/site/a.txt", nil); resp.Body.String() != "a v1" {
+		t.Fatalf("get a.txt = %d %q", resp.Code, resp.Body.String())
+	}
+	// featherd writes b.bin, so it has a content type and metadata to go stale.
+	put := httptest.NewRequest(http.MethodPut, "/site/b.bin", bytes.NewReader(noise(4096, 2)))
+	put.Header.Set("Content-Type", "image/png")
+	resp := httptest.NewRecorder()
+	handler.ServeHTTP(resp, put)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("put = %d %q", resp.Code, resp.Body.String())
+	}
+
+	// The shell's -u skips files whose mtime is unchanged, so give them new ones.
+	updated := map[string][]byte{"a.txt": []byte("a v2"), "b.bin": noise(4096, 3), "c/new.txt": []byte("new")}
+	writeTree(t, src, updated, 1700000100)
+	runSQLite(t, cli, archive, "-A", "-u", "-C", src, "a.txt", "b.bin", "c")
+	keys := listKeys(t, handler, "site")
+	if len(keys) != len(updated) {
+		t.Fatalf("listed %v after update", keys)
+	}
+	for key, body := range updated {
+		etag := quoteETag(body)
+		resp := serve(handler, http.MethodGet, "/site/"+key, nil)
+		if resp.Code != http.StatusOK || !bytes.Equal(resp.Body.Bytes(), body) || resp.Header().Get("ETag") != etag ||
+			resp.Header().Get("Content-Type") != "application/octet-stream" || keys[key] != etag {
+			t.Fatalf("get %s after update = %d, %d bytes, headers %v, listed ETag %s", key, resp.Code, resp.Body.Len(), resp.Header(), keys[key])
+		}
+	}
+
+	// Compare-and-swap sees the shell's write: the old ETag no longer matches.
+	stale := httptest.NewRequest(http.MethodPut, "/site/a.txt", strings.NewReader("lost"))
+	stale.Header.Set("If-Match", quoteETag([]byte("a v1")))
+	resp = httptest.NewRecorder()
+	handler.ServeHTTP(resp, stale)
+	if resp.Code != http.StatusPreconditionFailed {
+		t.Fatalf("put with stale If-Match = %d %q", resp.Code, resp.Body.String())
+	}
+
+	// -c drops and recreates the archive, so only its new files remain.
+	runSQLite(t, cli, archive, "-A", "-c", "-C", src, "c")
+	if keys := listKeys(t, handler, "site"); len(keys) != 1 || keys["c/new.txt"] != quoteETag([]byte("new")) {
+		t.Fatalf("listed %v after recreate", keys)
+	}
+	if resp := serve(handler, http.MethodGet, "/site/a.txt", nil); resp.Code != http.StatusNotFound {
+		t.Fatalf("get a.txt after recreate = %d", resp.Code)
+	}
+}
+
+// TestSQLARExtractsWithSQLiteCLI checks that `sqlite3 -Ax` extracts what
+// featherd stored, byte for byte.
+func TestSQLARExtractsWithSQLiteCLI(t *testing.T) {
+	cli := sqliteCLI(t)
 	path := filepath.Join(t.TempDir(), "b.sqlite3")
 	store := openSQLARStore(t, path)
 	files := map[string][]byte{
