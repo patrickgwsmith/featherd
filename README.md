@@ -121,6 +121,17 @@ Missing pieces include:
 - `If-Modified-Since` and `If-Unmodified-Since` (ignored, so the read
   proceeds as if they were absent)
 - bucket management APIs other than `CreateBucket`
+- object versioning (TODO): keep `sqlar` as the current version, so
+  `sqlite3 -A` still sees an ordinary archive, and record history in a
+  separate `object_versions` table (`name`, `version_id`, `mtime`, `sz`,
+  `data`, `sha256`, `content_type`, `is_delete_marker`) filled by `sqlar`
+  UPDATE/DELETE triggers alongside the `content_meta` ones, so overwrites by
+  the CLI are captured too. On top of that: a per-bucket Enabled/Suspended
+  setting via `PUT`/`GET ?versioning`, `x-amz-version-id` on `PUT` and `GET`,
+  `GET`/`HEAD`/`DELETE ?versionId=`, delete markers on plain `DELETE`,
+  `GET ?versions`, and version ID `null` for objects written before
+  versioning was enabled. Every overwrite keeps a full copy until lifecycle
+  pruning exists, and `sqlite3 -A -c` would turn every row into history.
 
 The goal is to grow compatibility by declaring a small subset, testing it
 against real clients, and only then expanding the contract.
