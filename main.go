@@ -1145,7 +1145,7 @@ func unsupportedRequest(r *http.Request, bucketOnly bool) string {
 }
 
 // amzValues returns the non-empty values of the x-amz-* parameter name from
-// the headers and then the query string, where presigned URLs carry them.
+// the headers and then the query string. URL signatures are not checked.
 func amzValues(r *http.Request, name string) []string {
 	var values []string
 	if v := r.Header.Get(name); v != "" {
@@ -1191,7 +1191,7 @@ var checksumAlgorithms = []struct {
 // checkPayloadDigests verifies the body against Content-MD5, a hex
 // x-amz-content-sha256 and any x-amz-checksum-* value, as S3 does, so a
 // corrupted upload is not stored. The x-amz-* values may also come from the
-// query string of a presigned URL; every value given is checked.
+// query string; every digest value given is checked.
 func checkPayloadDigests(r *http.Request, body []byte) error {
 	if want := r.Header.Get("Content-MD5"); want != "" {
 		sum := md5.Sum(body)

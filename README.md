@@ -37,8 +37,9 @@ featherd currently supports:
   (`crc32`, `crc32c`, `crc64nvme`, `sha1`, `sha256`) are verified on `PUT`; a
   mismatch returns 400 (`BadDigest` or `XAmzContentSHA256Mismatch`) and
   nothing is stored. The `x-amz-*` values are also read from the query
-  string, where presigned URLs carry them. A malformed checksum, more than one
-  checksum algorithm, or an `x-amz-sdk-checksum-algorithm` without its
+  string, including URLs that carry a signature; the signature is not checked.
+  A malformed checksum, more than one checksum algorithm, or an
+  `x-amz-sdk-checksum-algorithm` without its
   matching checksum returns 400 `InvalidRequest`. Checksums are not stored or
   returned on `GET`
 - S3 XML error documents (`<Error><Code>…</Code><Message>…</Message>…`) with
@@ -109,10 +110,9 @@ featherd does not yet claim full S3 compatibility.
 
 Missing pieces include:
 
-- SigV4 authentication
+- SigV4 authentication, including presigned URL signature verification
 - delimiters/common prefixes
 - multipart upload
-- presigned URLs
 - full conditional read semantics
 - bucket management APIs other than `CreateBucket`
 
