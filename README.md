@@ -164,6 +164,8 @@ full list.
   Inter) and look files up by version or by SHA-256 digest.
 - [`examples/sqlar`](examples/sqlar): pack a directory into a bucket with
   `sqlite3 -A`, serve and update it while featherd runs, and unpack it again.
+- [`examples/tz`](examples/tz): serve the IANA time zone database, one
+  object per zone, and look zones up by name or country.
 
 ## Test
 
