@@ -11,6 +11,19 @@ It is exploring a KISS subset of S3-shaped storage:
 - strong single-node consistency through serialized SQLite transactions
 - compare-and-swap writes with ETags
 
+## Install
+
+With Go 1.26 or newer:
+
+```sh
+go install github.com/patrickgwsmith/featherd@latest
+```
+
+This puts a `featherd` binary in `$(go env GOPATH)/bin`. Start it with
+`featherd --dir data` with `FEATHERD_AUTH` set to `sigv4` (plus a key pair) or
+`none`; see
+[Authentication](#authentication) and [Run](#run).
+
 ## Current Contract
 
 featherd currently supports:
@@ -42,7 +55,7 @@ featherd currently supports:
   (`crc32`, `crc32c`, `crc64nvme`, `sha1`, `sha256`) are verified on `PUT`; a
   mismatch returns 400 (`BadDigest` or `XAmzContentSHA256Mismatch`) and
   nothing is stored. The `x-amz-*` values are also read from the query
-  string, including URLs that carry a signature; the signature is not checked.
+  string, including presigned URLs.
   A malformed checksum, more than one checksum algorithm, or an
   `x-amz-sdk-checksum-algorithm` without its
   matching checksum returns 400 `InvalidRequest`. Checksums are not stored or
@@ -76,9 +89,62 @@ As in S3, a bucket must be created with `CreateBucket` before use;
 `HEAD`, `DELETE` and listing on a bucket that has no database file return 404
 `NoSuchBucket` (`HEAD` with no body) and create no file. Each
 bucket's database is an ordinary SQLite Archive, described below, so
-it can be copied, backed up or queried with `sqlite3` on its own. There is no
-authentication: anyone who can reach the listen address can read and write
-every object, so bind to a trusted interface.
+it can be copied, backed up or queried with `sqlite3` on its own.
+
+## Authentication
+
+`FEATHERD_AUTH` is required and names the mode, so it's always written down
+where featherd is deployed:
+
+- **`FEATHERD_AUTH=sigv4`** requires every request to be signed with the key
+  pair in `FEATHERD_ACCESS_KEY_ID` and `FEATHERD_SECRET_ACCESS_KEY` using
+  [SigV4](https://docs.aws.amazon.com/AmazonS3/latest/API/sig-v4-authenticating-requests.html),
+  as S3 checks it. Clients use the same pair as their `AWS_ACCESS_KEY_ID` and
+  `AWS_SECRET_ACCESS_KEY`. Both must be set.
+- **`FEATHERD_AUTH=none`** serves every request without authentication:
+  anyone who can reach the listen address can read and write every object, so
+  bind to a trusted interface. Neither key variable may be set.
+
+featherd refuses to start (exit code 2) if `FEATHERD_AUTH` is unset, has any
+other value, or doesn't match the key variables, so a missing or misspelled
+variable can't leave it open.
+
+- **Both forms are checked.** A signature can be in the `Authorization`
+  header or in a presigned URL's `X-Amz-*` query parameters, but not both
+  (400 `InvalidArgument`). Requests are checked before anything else,
+  including the bucket name, and before the body is read.
+- **What the signature covers.** The method, path, query string, `host`,
+  every `x-amz-*` header sent (an unsigned one returns 403 `AccessDenied`),
+  any other headers the client chose to sign, and `x-amz-content-sha256`.
+  Header-signed requests must send `x-amz-content-sha256` (400
+  `InvalidRequest` if missing). On writes, a hex digest there is checked
+  against the body, as above, so the body is covered too; `UNSIGNED-PAYLOAD`
+  leaves it uncovered, and presigned URLs are `UNSIGNED-PAYLOAD` unless they
+  sign a digest.
+- **Time limits.** A header-signed request's `X-Amz-Date` must be within 15
+  minutes of the server's clock (403 `RequestTimeTooSkewed`). A presigned URL
+  is valid from `X-Amz-Date` (15 minutes' leeway) until `X-Amz-Expires`
+  seconds later, at most 7 days (403 `AccessDenied`, "Request has expired").
+- **Any region.** featherd has no regions, so the credential scope may name
+  any region, but its service must be `s3`.
+- **Errors** use S3's codes: `AccessDenied` for unsigned requests,
+  `InvalidAccessKeyId`, `SignatureDoesNotMatch`,
+  `AuthorizationHeaderMalformed` and `AuthorizationQueryParametersError`.
+
+curl can sign requests itself:
+
+```sh
+curl --aws-sigv4 aws:amz:us-east-1:s3 \
+  --user "$AWS_ACCESS_KEY_ID:$AWS_SECRET_ACCESS_KEY" \
+  http://127.0.0.1:8333/fonts/inter/4.1/SHA256SUMS
+```
+
+There is one key pair, with access to every bucket. Signing doesn't
+encrypt anything, so serve featherd over TLS, e.g. behind a reverse proxy,
+whenever requests cross an untrusted network: a signed request seen in
+transit can be replayed until its time limit runs out.
+`TestSigV4AWSExamples` checks the signatures against the examples in AWS's
+documentation.
 
 ## Storage
 
@@ -120,7 +186,9 @@ featherd does not yet claim full S3 compatibility.
 
 Missing pieces include:
 
-- SigV4 authentication, including presigned URL signature verification
+- more than one key pair, and per-bucket or per-key permissions
+- SigV4 with the `Date` header instead of `X-Amz-Date`, signed `aws-chunked`
+  streaming uploads, and SigV4a; the older SigV2 isn't planned
 - delimiters/common prefixes
 - multipart upload
 - `If-Modified-Since` and `If-Unmodified-Since` (ignored, so the read
@@ -137,6 +205,14 @@ Missing pieces include:
   `GET ?versions`, and version ID `null` for objects written before
   versioning was enabled. Every overwrite keeps a full copy until lifecycle
   pruning exists, and `sqlite3 -A -c` would turn every row into history.
+- write-access proof (TODO), like ACME's HTTP-01 challenge: a verifier gives
+  an actor a random nonce, the actor writes it to
+  `.well-known/challenge/<nonce>` in the bucket with the root key or a
+  presigned `PUT`, and the verifier reads it back through a presigned `GET`
+  (over TLS) and checks the content. The key and a short expiry are fixed in
+  the signed URL so it can't be replayed elsewhere. Until there are
+  per-actor scoped credentials it only proves the root key approved the
+  write, not that a particular actor has access.
 
 The goal is to grow compatibility by declaring a small subset, testing it
 against real clients, and only then expanding the contract.
@@ -146,16 +222,28 @@ against real clients, and only then expanding the contract.
 The schema is embedded in the executable, so it can run outside the source
 directory.
 
+Require signed requests (see [Authentication](#authentication)), with a
+secret made once by e.g. `openssl rand -hex 32` and given to clients too:
+
 ```sh
-go run . \
+FEATHERD_AUTH=sigv4 \
+FEATHERD_ACCESS_KEY_ID=featherd \
+FEATHERD_SECRET_ACCESS_KEY=<secret> \
+  go run . \
   --addr 127.0.0.1:8333 \
   --dir data
+```
+
+Or, on a trusted machine, serve every request without authentication:
+
+```sh
+FEATHERD_AUTH=none go run . --dir data
 ```
 
 Set a smaller cap while testing:
 
 ```sh
-go run . --max-object-bytes 10485760
+FEATHERD_AUTH=none go run . --max-object-bytes 10485760
 ```
 
 Long options take two dashes, with the value after a space or `=`

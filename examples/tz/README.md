@@ -25,7 +25,7 @@ zone they point to, so every name a program might use can be fetched directly.
 ## Try it
 
 ```sh
-go run . --dir data &
+FEATHERD_AUTH=none go run . --dir data &  # the scripts send unsigned requests
 
 examples/tz/tz.sh put                # or: put path/to/zoneinfo
 # stored 599 zones from /usr/share/zoneinfo

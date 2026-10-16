@@ -1214,7 +1214,8 @@ func unsupportedRequest(r *http.Request, bucketOnly bool) string {
 }
 
 // amzValues returns the non-empty values of the x-amz-* parameter name from
-// the headers and then the query string. URL signatures are not checked.
+// the headers and then the query string. Signatures are checked, if at all,
+// by sigV4Auth before the handler runs.
 func amzValues(r *http.Request, name string) []string {
 	var values []string
 	if v := r.Header.Get(name); v != "" {
@@ -1580,6 +1581,13 @@ const usage = `usage: featherd [options]
   --dir DIR                directory holding one sqlite database per bucket (default data)
   --max-object-bytes N     maximum object size in bytes (default 20971520)
   -h, --help               show this help
+
+environment:
+  FEATHERD_AUTH               required; "sigv4" or "none"
+  FEATHERD_AUTH=sigv4         require every request to be signed (SigV4) with
+                              FEATHERD_ACCESS_KEY_ID and
+                              FEATHERD_SECRET_ACCESS_KEY, which must be set
+  FEATHERD_AUTH=none          serve every request without authentication
 `
 
 type options struct {
@@ -1661,6 +1669,11 @@ func main() {
 		fmt.Print(usage)
 		return
 	}
+	auth, err := authFromEnv(os.Getenv)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "featherd: %v\n", err)
+		os.Exit(2)
+	}
 
 	dir, err := OpenDir(opts.dir, opts.maxObjectBytes)
 	if err != nil {
@@ -1668,8 +1681,15 @@ func main() {
 	}
 	defer dir.Close()
 
+	handler := newHandler(dir)
+	if auth != nil {
+		handler = auth.wrap(handler)
+		fmt.Printf("featherd: requests must be signed (SigV4) with access key %s\n", auth.accessKeyID)
+	} else {
+		fmt.Printf("featherd: no authentication (%s=%s): anyone who can reach %s can read and write every object\n", authEnvMode, authModeNone, opts.addr)
+	}
 	fmt.Printf("featherd listening on http://%s using %s/<bucket>.sqlite3\n", opts.addr, opts.dir)
-	panic(http.ListenAndServe(opts.addr, newHandler(dir)))
+	panic(http.ListenAndServe(opts.addr, handler))
 }
 
 func writeStoreResult(w http.ResponseWriter, r *http.Request, obj Object, err error) {

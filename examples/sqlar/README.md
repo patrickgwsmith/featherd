@@ -11,7 +11,7 @@ directory as `<bucket>.sqlite3` and featherd serves its files as objects. No
 ## Try it with a static site
 
 ```sh
-go run . --dir data &
+FEATHERD_AUTH=none go run . --dir data &  # the scripts send unsigned requests
 
 mkdir -p site/css
 echo '<link rel=stylesheet href=css/site.css><p>hello</p>' > site/index.html
