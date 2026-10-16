@@ -1198,6 +1198,11 @@ func unsupportedRequest(r *http.Request, bucketOnly bool) string {
 		if r.Header.Get("X-Amz-Copy-Source") != "" {
 			return "x-amz-copy-source"
 		}
+		// There is no website endpoint to serve the redirect from, and no
+		// metadata column to keep it in.
+		if amzValue(r, "x-amz-website-redirect-location") != "" {
+			return "x-amz-website-redirect-location"
+		}
 		if strings.Contains(strings.ToLower(r.Header.Get("Content-Encoding")), "aws-chunked") ||
 			strings.HasPrefix(amzValue(r, "x-amz-content-sha256"), "STREAMING-") ||
 			r.Header.Get("X-Amz-Decoded-Content-Length") != "" ||

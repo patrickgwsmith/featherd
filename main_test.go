@@ -1023,6 +1023,8 @@ func TestUnsupportedRequestsDoNotTouchObjects(t *testing.T) {
 		{http.MethodGet, "/bkt/k?versionId=v1", nil},
 		{http.MethodGet, "/bkt?list-type=2&delimiter=/", nil},
 		{http.MethodPut, "/bkt/k", http.Header{"X-Amz-Copy-Source": {"/bkt/other"}}},
+		{http.MethodPut, "/bkt/k", http.Header{"X-Amz-Website-Redirect-Location": {"/new.html"}}},
+		{http.MethodPut, "/bkt/k?X-Amz-Signature=abc&x-amz-website-redirect-location=%2Fnew.html", nil},
 		{http.MethodPut, "/bkt/k", http.Header{"Content-Encoding": {"aws-chunked"}}},
 		{http.MethodPut, "/bkt/k", http.Header{"X-Amz-Content-Sha256": {"STREAMING-UNSIGNED-PAYLOAD-TRAILER"}}},
 	}

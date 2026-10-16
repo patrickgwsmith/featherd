@@ -61,7 +61,7 @@ featherd currently supports:
 Requests that depend on unsupported S3 features return 501 rather than being
 treated as plain object operations: subresource query parameters such as
 `?tagging`, `?acl`, `?uploadId` or `?versionId`, a non-empty `delimiter`,
-`x-amz-copy-source`, `aws-chunked` streaming bodies and `x-amz-trailer`
+`x-amz-copy-source`, `x-amz-website-redirect-location`, `aws-chunked` streaming bodies and `x-amz-trailer`
 checksums, object lock on
 `CreateBucket`, and bucket operations other than `CreateBucket` and
 `GET ?list-type=2` (including `ListBuckets` on `/` and `DeleteBucket`).
