@@ -253,6 +253,11 @@ full list.
 
 ## Examples
 
+- [`examples/atomic-publish`](examples/atomic-publish): publish a
+  directory, such as a static site, so readers see the whole old release
+  or the whole new one. The `current` pointer is switched with `If-Match`,
+  which stops one publisher from overwriting another, and old releases are
+  deleted below a floor that rollbacks can't cross.
 - [`examples/fonts`](examples/fonts): store official font releases (e.g.
   Inter) and look files up by version or by SHA-256 digest.
 - [`examples/sqlar`](examples/sqlar): pack a directory into a bucket with
