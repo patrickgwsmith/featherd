@@ -103,7 +103,12 @@ and `content_type`. So
   the file read-write so SQLite can roll the write back.
 - **No WAL.** featherd keeps SQLite's default rollback journal, so the
   `.sqlite3` file alone holds every committed write, with no `-wal` or
-  `-shm` files beside it.
+  `-shm` files beside it. If another tool switches a bucket to WAL, which
+  isn't supported, featherd keeps using WAL: it can't open the bucket for
+  reads until something with write access has created the `-wal` and `-shm`
+  files, and writes can stay in `-wal` after featherd stops. Run
+  `sqlite3 bucket.sqlite3 'PRAGMA journal_mode = DELETE'` to switch back.
+  `TestServesDatabaseSwitchedToWAL` checks this.
 - **No stale ETags.** Triggers drop an entry's `content_meta` row whenever
   anything writes the entry, including `sqlite3 -A`. If the triggers are
   missing, e.g. after `sqlite3 -A -c` recreated the archive, featherd ignores

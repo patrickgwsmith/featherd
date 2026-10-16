@@ -495,6 +495,118 @@ func TestStoreIsReadOnlyUntilWritten(t *testing.T) {
 	}
 }
 
+// TestServesDatabaseSwitchedToWAL records the current, unsupported behavior
+// when another tool runs `PRAGMA journal_mode = WAL` on a bucket. featherd
+// never sets journal_mode, so it keeps the file in WAL mode. Read-only opens
+// then need the -wal and -shm files to exist, and committed writes stay in
+// the -wal file until a checkpoint, so the .sqlite3 file alone no longer holds
+// them.
+func TestServesDatabaseSwitchedToWAL(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "b.sqlite3")
+	store := openSQLARStore(t, path)
+	if _, err := store.Put("b", "a", []byte("before"), "", nil, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.exec("PRAGMA journal_mode = WAL"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	// openWritable opens path read-write, as featherd does on a first write.
+	openWritable := func(path string) *Store {
+		t.Helper()
+		s := &Store{path: path, maxObjectBytes: defaultMaxObjectBytes}
+		t.Cleanup(func() { _ = s.Close() })
+		if err := s.openLocked(true); err != nil {
+			t.Fatal(err)
+		}
+		return s
+	}
+
+	// Switching creates no -wal or -shm file, and a read-only connection
+	// can't create them, so the bucket can't be opened for reads.
+	if _, err := OpenStore(path); err == nil {
+		t.Fatal("opened a WAL database read-only without its -wal and -shm files")
+	}
+
+	// A read-write connection creates them, and then reads start read-only.
+	writer := openWritable(path)
+	if got, err := writer.Get("b", "a"); err != nil || string(got.Body) != "before" {
+		t.Fatalf("get = %q, %v", got.Body, err)
+	}
+	if isWAL, _, err := writer.queryInt(`SELECT journal_mode = 'wal' FROM pragma_journal_mode`, nil); err != nil || isWAL != 1 {
+		t.Fatalf("journal_mode is not wal: %v", err)
+	}
+	reader := openSQLARStore(t, path)
+	if got, err := reader.Get("b", "a"); err != nil || string(got.Body) != "before" || reader.writable {
+		t.Fatalf("read-only get = %q, %v, writable %v", got.Body, err, reader.writable)
+	}
+
+	// A write goes to the -wal file, leaving the database file as it was, and
+	// other connections see it.
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.Put("b", "b", []byte("after"), "", nil, false); err != nil {
+		t.Fatal(err)
+	}
+	if after, err := os.ReadFile(path); err != nil || !bytes.Equal(after, before) {
+		t.Fatalf("database file changed by a WAL write: %v", err)
+	}
+	if got, err := reader.Get("b", "b"); err != nil || string(got.Body) != "after" {
+		t.Fatalf("read-only get after write = %q, %v", got.Body, err)
+	}
+
+	// Only the last connection to close checkpoints, and only if it can write,
+	// so the write can outlive every connection in the -wal file.
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := reader.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if info, err := os.Stat(path + "-wal"); err != nil || info.Size() == 0 {
+		t.Fatalf("WAL file after close = %v, %v; want the write still in it", info, err)
+	}
+	copyFile := func(name string) string {
+		t.Helper()
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		dst := filepath.Join(dir, name)
+		if err := os.WriteFile(dst, data, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return dst
+	}
+
+	// A copy of the database file alone lacks the write.
+	copied := openWritable(copyFile("copy.sqlite3"))
+	if _, err := copied.Get("b", "b"); !errors.Is(err, errNotFound) {
+		t.Fatalf("get from a copy of the database file alone = %v; want not found", err)
+	}
+	if got, err := copied.Get("b", "a"); err != nil || string(got.Body) != "before" {
+		t.Fatalf("get a from the copy = %q, %v", got.Body, err)
+	}
+
+	// Switching back to the rollback journal checkpoints the write into the
+	// database file and removes the -wal file, so a copy has everything again.
+	writer = openWritable(path)
+	if err := writer.exec("PRAGMA journal_mode = DELETE"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path + "-wal"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("WAL file exists after switching back: %v", err)
+	}
+	if got, err := openSQLARStore(t, copyFile("restored.sqlite3")).Get("b", "b"); err != nil || string(got.Body) != "after" {
+		t.Fatalf("get from a copy after switching back = %q, %v", got.Body, err)
+	}
+}
+
 // TestReadsLeaveArchiveUnchanged serves an archive made by another tool, with
 // no content_meta table, without adding featherd's tables to it.
 func TestReadsLeaveArchiveUnchanged(t *testing.T) {
