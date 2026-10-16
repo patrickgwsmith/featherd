@@ -264,6 +264,9 @@ full list.
   many workers, and sweep old claims.
 - [`examples/fonts`](examples/fonts): store official font releases (e.g.
   Inter) and look files up by version or by SHA-256 digest.
+- [`examples/oauth-client`](examples/oauth-client): sign in with GitHub,
+  keeping each sign-in's single-use OAuth state and PKCE verifier, and the
+  link from each GitHub user to a local user, under `oauth-client/`.
 - [`examples/sqlar`](examples/sqlar): pack a directory into a bucket with
   `sqlite3 -A`, serve and update it while featherd runs, and unpack it again.
 - [`examples/tz`](examples/tz): serve the IANA time zone database, one
