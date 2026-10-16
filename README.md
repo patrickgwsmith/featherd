@@ -271,6 +271,9 @@ full list.
   `sqlite3 -A`, serve and update it while featherd runs, and unpack it again.
 - [`examples/tz`](examples/tz): serve the IANA time zone database, one
   object per zone, and look zones up by name or country.
+- [`examples/webhook-once`](examples/webhook-once): handle each webhook
+  event once however often it's delivered, by claiming its event ID with
+  `If-None-Match: *`, and retry failed or crashed deliveries on one worker.
 
 ## Test
 
