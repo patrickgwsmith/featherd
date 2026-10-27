@@ -216,6 +216,10 @@ Missing pieces include:
 
 The goal is to grow compatibility by declaring a small subset, testing it
 against real clients, and only then expanding the contract.
+Treat curl as one of those clients: for each new HTTP feature, check whether
+curl can exercise it directly (including `--aws-sigv4` when authentication is
+enabled), document a working command, and test the request it sends. This
+keeps common operations usable from a shell without a dedicated S3 SDK.
 
 ## Run
 
@@ -267,6 +271,13 @@ full list.
 - [`examples/oauth-client`](examples/oauth-client): sign in with GitHub,
   keeping each sign-in's single-use OAuth state and PKCE verifier, and the
   link from each GitHub user to a local user, under `oauth-client/`.
+- [`examples/rss-reader`](examples/rss-reader): poll RSS and Atom feeds,
+  store each post once under `const/` with `If-None-Match: *`, keep each
+  feed's state under `mut/` with `If-Match`, and write the newest posts to
+  `view/index.html`. A standalone Go program with its own module.
+- [`examples/rss-reader-qip`](examples/rss-reader-qip): the same reader as
+  a Node host with no dependencies, whose feed parsing, feed statechart and
+  page rendering are [QIP](https://qip.dev) components written in Odin.
 - [`examples/sqlar`](examples/sqlar): pack a directory into a bucket with
   `sqlite3 -A`, serve and update it while featherd runs, and unpack it again.
 - [`examples/tz`](examples/tz): serve the IANA time zone database, one
