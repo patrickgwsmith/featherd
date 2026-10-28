@@ -10,6 +10,8 @@ Its one output is `view/index.html`. Serving that page publicly is left
 open for now: featherd's `FEATHERD_AUTH` covers every key, so a browser
 can't read it unsigned unless featherd runs with `FEATHERD_AUTH=none`.
 Put a GET-only proxy for `view/` in front, or copy the page to a static host.
+[`../deploy.sh`](../deploy.sh) does the second on a Linux server:
+`ssh <host> bash -s -- rss-reader < examples/deploy.sh`.
 
 ## Layout
 
