@@ -85,11 +85,15 @@ main() {
 		) </dev/null
 	done
 
-	# Caddy.
-	if ! command -v caddy >/dev/null; then
-		log "installing caddy"
+	# Caddy, and a C compiler and SQLite's headers for featherd's cgo build.
+	local pkgs=()
+	command -v caddy >/dev/null || pkgs+=(caddy)
+	command -v gcc >/dev/null || pkgs+=(gcc)
+	dpkg -s libsqlite3-dev >/dev/null 2>&1 || pkgs+=(libsqlite3-dev)
+	if ((${#pkgs[@]})); then
+		log "installing ${pkgs[*]}"
 		sudo apt-get update -q </dev/null
-		sudo DEBIAN_FRONTEND=noninteractive apt-get install -yq caddy </dev/null
+		sudo DEBIAN_FRONTEND=noninteractive apt-get install -yq "${pkgs[@]}" </dev/null
 	fi
 
 	# Binaries, replaced only if the build differs. A failed build stops

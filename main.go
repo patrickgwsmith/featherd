@@ -1,7 +1,7 @@
 package main
 
 /*
-#cgo darwin LDFLAGS: -lsqlite3
+#cgo LDFLAGS: -lsqlite3
 #include <sqlite3.h>
 #include <stdlib.h>
 */
