@@ -38,8 +38,11 @@ featherd currently supports:
 - `HEAD /{bucket}/{key}`
 - `DELETE /{bucket}/{key}`
 - `GET /{bucket}?list-type=2&prefix={prefix}` with `max-keys` (capped at
-  1000), `start-after`, `continuation-token` pagination, and
-  `encoding-type=url` (also applied automatically when XML cannot represent a key)
+  1000), `start-after`, `continuation-token` pagination,
+  `encoding-type=url` (also applied automatically when XML cannot represent a key),
+  and `delimiter`, which rolls keys up into `CommonPrefixes` that count
+  towards `max-keys`. Each common prefix costs one index seek however many
+  keys it holds
 - `If-None-Match: *` for create-if-absent (other `If-None-Match` values on
   `PUT` are rejected with 501 rather than ignored)
 - `If-Match: "<etag>"` for compare-and-swap writes and deletes
@@ -73,7 +76,7 @@ featherd currently supports:
 
 Requests that depend on unsupported S3 features return 501 rather than being
 treated as plain object operations: subresource query parameters such as
-`?tagging`, `?acl`, `?uploadId` or `?versionId`, a non-empty `delimiter`,
+`?tagging`, `?acl`, `?uploadId` or `?versionId`,
 `x-amz-copy-source`, `x-amz-website-redirect-location`, `aws-chunked` streaming bodies and `x-amz-trailer`
 checksums, object lock on
 `CreateBucket`, and bucket operations other than `CreateBucket` and
@@ -189,7 +192,6 @@ Missing pieces include:
 - more than one key pair, and per-bucket or per-key permissions
 - SigV4 with the `Date` header instead of `X-Amz-Date`, signed `aws-chunked`
   streaming uploads, and SigV4a; the older SigV2 isn't planned
-- delimiters/common prefixes
 - multipart upload
 - `If-Modified-Since` and `If-Unmodified-Since` (ignored, so the read
   proceeds as if they were absent)

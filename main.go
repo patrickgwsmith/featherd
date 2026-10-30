@@ -114,7 +114,7 @@ WHERE ` + where
 
 const (
 	whereKey  = `s.name = :key AND ` + sqlarFile
-	whereList = `s.name >= :prefix AND s.name > :after AND (:prefix = '' OR s.name < :upper) AND ` + sqlarFile + `
+	whereList = `s.name >= :from AND s.name > :after AND (:prefix = '' OR s.name < :upper) AND ` + sqlarFile + `
 ORDER BY s.name
 LIMIT :limit`
 
@@ -163,6 +163,7 @@ type listBucketResult struct {
 	Xmlns                 string        `xml:"xmlns,attr"`
 	Name                  string        `xml:"Name"`
 	Prefix                string        `xml:"Prefix"`
+	Delimiter             string        `xml:"Delimiter,omitempty"`
 	EncodingType          string        `xml:"EncodingType,omitempty"`
 	StartAfter            string        `xml:"StartAfter,omitempty"`
 	ContinuationToken     string        `xml:"ContinuationToken,omitempty"`
@@ -171,6 +172,11 @@ type listBucketResult struct {
 	MaxKeys               int           `xml:"MaxKeys"`
 	IsTruncated           bool          `xml:"IsTruncated"`
 	Contents              []listContent `xml:"Contents"`
+	CommonPrefixes        []listPrefix  `xml:"CommonPrefixes"`
+}
+
+type listPrefix struct {
+	Prefix string `xml:"Prefix"`
 }
 
 // s3Error is S3's error document. SDKs map Code to typed exceptions, e.g.
@@ -658,6 +664,16 @@ func (s *Store) Delete(bucket, key string, ifMatch *string) error {
 // List returns up to limit objects under prefix whose keys sort after
 // startAfter, and whether more matching objects remain.
 func (s *Store) List(bucket, prefix, startAfter string, limit int) ([]Object, bool, error) {
+	objects, _, truncated, err := s.ListDelimited(bucket, prefix, "", startAfter, limit)
+	return objects, truncated, err
+}
+
+// ListDelimited is List, except that when delimiter is non-empty, keys that
+// contain it after prefix are rolled up into common prefixes ending at its
+// first occurrence. Objects and common prefixes together count towards
+// limit, as in S3. A startAfter that is itself a common prefix skips every
+// key under it, so a page can resume after the prefix that ended the last.
+func (s *Store) ListDelimited(bucket, prefix, delimiter, startAfter string, limit int) ([]Object, []string, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -665,46 +681,93 @@ func (s *Store) List(bucket, prefix, startAfter string, limit int) ([]Object, bo
 		limit = maxListKeys
 	}
 	if err := s.readyLocked(); err != nil || !s.hasSQLAR {
-		return nil, false, err
+		return nil, nil, false, err
 	}
-	var out []Object
+	from := prefix
+	if cp := commonPrefix(startAfter, prefix, delimiter); cp != "" && cp == startAfter {
+		from = max(from, prefixUpperBound(cp))
+	}
+	var objects []Object
+	var prefixes []string
+	lastWasPrefix := false
 	err := s.withStmt(selectObjects(s.metaTrusted, whereList), func(stmt *C.sqlite3_stmt) error {
-		err := bindParams(stmt, params{
-			"prefix": prefix,
-			"after":  startAfter,
-			"upper":  prefixUpperBound(prefix),
-			// Fetch one extra row to learn whether the listing is truncated.
-			"limit": int64(limit + 1),
-		})
-		if err != nil {
-			return err
-		}
-		for {
-			rc := C.sqlite3_step(stmt)
-			if rc == C.SQLITE_DONE {
-				return nil
+		// Each common prefix restarts the scan past its keys, so a directory
+		// of any size costs one index seek rather than a row per key.
+		for len(objects)+len(prefixes) <= limit {
+			C.sqlite3_reset(stmt)
+			err := bindParams(stmt, params{
+				"from":   from,
+				"prefix": prefix,
+				"after":  startAfter,
+				"upper":  prefixUpperBound(prefix),
+				// Fetch one extra row to learn whether the listing is truncated.
+				"limit": int64(limit + 1 - len(objects) - len(prefixes)),
+			})
+			if err != nil {
+				return err
 			}
-			if rc != C.SQLITE_ROW {
-				return s.lastErr()
-			}
-			e := scanEntry(stmt)
-			if e.ETag == "" {
-				var err error
-				if e.ETag, err = s.etagLocked(e); err != nil {
-					return err
+			restart := false
+			for !restart {
+				rc := C.sqlite3_step(stmt)
+				if rc == C.SQLITE_DONE {
+					return nil
 				}
+				if rc != C.SQLITE_ROW {
+					return s.lastErr()
+				}
+				e := scanEntry(stmt)
+				if cp := commonPrefix(e.Key, prefix, delimiter); cp != "" {
+					// S3 filters CommonPrefixes lexicographically at StartAfter,
+					// even when matching keys under that prefix sort after it.
+					if cp <= startAfter {
+						from = prefixUpperBound(cp)
+						restart = true
+						continue
+					}
+					prefixes = append(prefixes, cp)
+					lastWasPrefix = true
+					from = prefixUpperBound(cp)
+					restart = true
+					continue
+				}
+				if e.ETag == "" {
+					var err error
+					if e.ETag, err = s.etagLocked(e); err != nil {
+						return err
+					}
+				}
+				e.Bucket = bucket
+				objects = append(objects, e.Object)
+				lastWasPrefix = false
 			}
-			e.Bucket = bucket
-			out = append(out, e.Object)
 		}
+		return nil
 	})
 	if err != nil {
-		return nil, false, err
+		return nil, nil, false, err
 	}
-	if len(out) > limit {
-		return out[:limit], true, nil
+	if len(objects)+len(prefixes) > limit {
+		if lastWasPrefix {
+			prefixes = prefixes[:len(prefixes)-1]
+		} else {
+			objects = objects[:len(objects)-1]
+		}
+		return objects, prefixes, true, nil
 	}
-	return out, false, nil
+	return objects, prefixes, false, nil
+}
+
+// commonPrefix returns key up to and including the first delimiter after
+// prefix, or "" if key isn't under prefix or has no delimiter after it.
+func commonPrefix(key, prefix, delimiter string) string {
+	if delimiter == "" || !strings.HasPrefix(key, prefix) {
+		return ""
+	}
+	i := strings.Index(key[len(prefix):], delimiter)
+	if i < 0 {
+		return ""
+	}
+	return key[:len(prefix)+i+len(delimiter)]
 }
 
 func (s *Store) exec(sql string) error {
@@ -1188,9 +1251,6 @@ func unsupportedRequest(r *http.Request, bucketOnly bool) string {
 		}
 		return "query parameter " + name
 	}
-	if bucketOnly && r.URL.Query().Get("delimiter") != "" {
-		return "delimiter"
-	}
 	if bucketOnly && r.Method == http.MethodPut && strings.EqualFold(r.Header.Get("X-Amz-Bucket-Object-Lock-Enabled"), "true") {
 		return "x-amz-bucket-object-lock-enabled"
 	}
@@ -1317,15 +1377,16 @@ func checkPayloadDigests(r *http.Request, body []byte) error {
 type listRequest struct {
 	Bucket            string
 	Prefix            string
+	Delimiter         string
 	StartAfter        string
 	ContinuationToken string
 	EncodingType      string
 	MaxKeys           int
 }
 
-func writeListResult(w http.ResponseWriter, req listRequest, objects []Object, truncated bool) {
+func writeListResult(w http.ResponseWriter, req listRequest, objects []Object, prefixes []string, truncated bool) {
 	encodingType := req.EncodingType
-	if encodingType == "" && (!xmlSafeString(req.Prefix) || !xmlSafeString(req.StartAfter)) {
+	if encodingType == "" && (!xmlSafeString(req.Prefix) || !xmlSafeString(req.Delimiter) || !xmlSafeString(req.StartAfter)) {
 		encodingType = "url"
 	}
 	for _, obj := range objects {
@@ -1334,24 +1395,49 @@ func writeListResult(w http.ResponseWriter, req listRequest, objects []Object, t
 			break
 		}
 	}
+	for _, p := range prefixes {
+		if !xmlSafeString(p) {
+			encodingType = "url"
+			break
+		}
+	}
 	result := listBucketResult{
 		Xmlns:             "http://s3.amazonaws.com/doc/2006-03-01/",
 		Name:              req.Bucket,
 		Prefix:            req.Prefix,
+		Delimiter:         req.Delimiter,
 		EncodingType:      encodingType,
 		StartAfter:        req.StartAfter,
 		ContinuationToken: req.ContinuationToken,
-		KeyCount:          len(objects),
+		KeyCount:          len(objects) + len(prefixes),
 		MaxKeys:           req.MaxKeys,
 		IsTruncated:       truncated,
 		Contents:          make([]listContent, 0, len(objects)),
 	}
 	if encodingType == "url" {
 		result.Prefix = url.QueryEscape(req.Prefix)
+		result.Delimiter = url.QueryEscape(req.Delimiter)
 		result.StartAfter = url.QueryEscape(req.StartAfter)
 	}
-	if truncated && len(objects) > 0 {
-		result.NextContinuationToken = base64.RawURLEncoding.EncodeToString([]byte(objects[len(objects)-1].Key))
+	if truncated {
+		// The last entry in key order, so the next page resumes after it. A
+		// common prefix as the token skips the rest of its keys.
+		var last string
+		if len(objects) > 0 {
+			last = objects[len(objects)-1].Key
+		}
+		if len(prefixes) > 0 {
+			last = max(last, prefixes[len(prefixes)-1])
+		}
+		if last != "" {
+			result.NextContinuationToken = base64.RawURLEncoding.EncodeToString([]byte(last))
+		}
+	}
+	for _, p := range prefixes {
+		if encodingType == "url" {
+			p = url.QueryEscape(p)
+		}
+		result.CommonPrefixes = append(result.CommonPrefixes, listPrefix{Prefix: p})
 	}
 	for _, obj := range objects {
 		key := obj.Key
@@ -1463,6 +1549,7 @@ func newHandler(buckets Buckets) http.Handler {
 			req := listRequest{
 				Bucket:            bucket,
 				Prefix:            query.Get("prefix"),
+				Delimiter:         query.Get("delimiter"),
 				StartAfter:        query.Get("start-after"),
 				ContinuationToken: query.Get("continuation-token"),
 				EncodingType:      query.Get("encoding-type"),
@@ -1490,16 +1577,17 @@ func newHandler(buckets Buckets) http.Handler {
 				after = string(decoded)
 			}
 			var objects []Object
+			var prefixes []string
 			truncated := false
 			if req.MaxKeys > 0 {
 				var err error
-				objects, truncated, err = store.List(bucket, req.Prefix, after, req.MaxKeys)
+				objects, prefixes, truncated, err = store.ListDelimited(bucket, req.Prefix, req.Delimiter, after, req.MaxKeys)
 				if err != nil {
 					writeStoreResult(w, r, Object{}, err)
 					return
 				}
 			}
-			writeListResult(w, req, objects, truncated)
+			writeListResult(w, req, objects, prefixes, truncated)
 			return
 		}
 		switch r.Method {

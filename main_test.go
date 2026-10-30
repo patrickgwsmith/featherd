@@ -15,6 +15,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -618,6 +619,123 @@ func TestListPagination(t *testing.T) {
 	}
 }
 
+func TestListDelimiter(t *testing.T) {
+	store := newTestStore(t)
+	for _, key := range []string{"a", "b/", "b/1", "b/2", "c/x/1", "c/y", "d", "e/1", "f"} {
+		if _, err := store.Put("bkt", key, []byte(key), "", nil, false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	handler := newHandler(singleStore(store))
+
+	list := func(query string) []string {
+		t.Helper()
+		var entries []string
+		token := ""
+		for pages := 0; ; pages++ {
+			if pages > 10 {
+				t.Fatal("pagination did not terminate")
+			}
+			target := "/bkt?list-type=2&delimiter=/" + query
+			if token != "" {
+				target += "&continuation-token=" + token
+			}
+			resp := httptest.NewRecorder()
+			handler.ServeHTTP(resp, httptest.NewRequest(http.MethodGet, target, nil))
+			if resp.Code != http.StatusOK {
+				t.Fatalf("%s: status = %d body=%q", target, resp.Code, resp.Body.String())
+			}
+			var result listBucketResult
+			if err := xml.Unmarshal(resp.Body.Bytes(), &result); err != nil {
+				t.Fatal(err)
+			}
+			if result.Delimiter != "/" {
+				t.Fatalf("%s: Delimiter = %q", target, result.Delimiter)
+			}
+			if result.KeyCount != len(result.Contents)+len(result.CommonPrefixes) {
+				t.Fatalf("%s: KeyCount = %d, want %d", target, result.KeyCount, len(result.Contents)+len(result.CommonPrefixes))
+			}
+			var page []string
+			for _, c := range result.Contents {
+				page = append(page, c.Key)
+			}
+			for _, p := range result.CommonPrefixes {
+				page = append(page, p.Prefix+"*")
+			}
+			sort.Strings(page)
+			entries = append(entries, page...)
+			if !result.IsTruncated {
+				return entries
+			}
+			token = result.NextContinuationToken
+		}
+	}
+
+	want := "a,b/*,c/*,d,e/*,f"
+	for _, query := range []string{"", "&max-keys=1", "&max-keys=2", "&max-keys=4"} {
+		if got := strings.Join(list(query), ","); got != want {
+			t.Errorf("delimiter=/%s: entries = %s, want %s", query, got, want)
+		}
+	}
+	if got := strings.Join(list("&prefix=c/"), ","); got != "c/x/*,c/y" {
+		t.Errorf("prefix=c/: entries = %s", got)
+	}
+	if got := strings.Join(list("&prefix=b/&max-keys=1"), ","); got != "b/,b/1,b/2" {
+		t.Errorf("prefix=b/: entries = %s", got)
+	}
+	if got := strings.Join(list("&start-after=b/"), ","); got != "c/*,d,e/*,f" {
+		t.Errorf("start-after=b/: entries = %s", got)
+	}
+	// CommonPrefixes at or before StartAfter are filtered even if their
+	// matching object keys sort after StartAfter.
+	if got := strings.Join(list("&start-after=b/1"), ","); got != "c/*,d,e/*,f" {
+		t.Errorf("start-after=b/1: entries = %s", got)
+	}
+
+	// A common prefix found while probing past a full page is held back,
+	// reported as truncation, and returned first on the next page.
+	pages := []struct {
+		after    string
+		objects  string
+		prefixes string
+		more     bool
+	}{
+		{"", "a", "", true},
+		{"a", "", "b/", true},
+		{"b/", "", "c/", true},
+		{"c/", "d", "", true},
+		{"d", "", "e/", true},
+		{"e/", "f", "", false},
+	}
+	for _, p := range pages {
+		objects, prefixes, more, err := store.ListDelimited("bkt", "", "/", p.after, 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var keys []string
+		for _, o := range objects {
+			keys = append(keys, o.Key)
+		}
+		if strings.Join(keys, ",") != p.objects || strings.Join(prefixes, ",") != p.prefixes || more != p.more {
+			t.Errorf("after %q: objects = %v prefixes = %v truncated = %v, want %s / %s / %v", p.after, keys, prefixes, more, p.objects, p.prefixes, p.more)
+		}
+	}
+	// An exactly full last page isn't truncated, whether it ends in an
+	// object or a common prefix.
+	for _, tc := range []struct {
+		prefix, after string
+		limit         int
+	}{{"", "", 6}, {"", "a", 5}, {"", "c/", 3}, {"b", "", 1}, {"c/", "", 2}} {
+		_, _, more, err := store.ListDelimited("bkt", tc.prefix, "/", tc.after, tc.limit)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if more {
+			t.Errorf("prefix %q after %q limit %d: truncated on a full last page", tc.prefix, tc.after, tc.limit)
+		}
+	}
+}
+
 func TestListCapsMaxKeys(t *testing.T) {
 	store := newTestStore(t)
 	resp := httptest.NewRecorder()
@@ -1021,7 +1139,6 @@ func TestUnsupportedRequestsDoNotTouchObjects(t *testing.T) {
 		{http.MethodDelete, "/bkt/k?tagging", nil},
 		{http.MethodDelete, "/bkt/k?versionId=v1", nil},
 		{http.MethodGet, "/bkt/k?versionId=v1", nil},
-		{http.MethodGet, "/bkt?list-type=2&delimiter=/", nil},
 		{http.MethodPut, "/bkt/k", http.Header{"X-Amz-Copy-Source": {"/bkt/other"}}},
 		{http.MethodPut, "/bkt/k", http.Header{"X-Amz-Website-Redirect-Location": {"/new.html"}}},
 		{http.MethodPut, "/bkt/k?X-Amz-Signature=abc&x-amz-website-redirect-location=%2Fnew.html", nil},
