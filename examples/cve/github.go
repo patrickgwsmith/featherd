@@ -89,8 +89,9 @@ type delta struct {
 }
 
 type change struct {
-	CVEID      string `json:"cveId"`
-	GitHubLink string `json:"githubLink"`
+	CVEID       string `json:"cveId"`
+	GitHubLink  string `json:"githubLink"`
+	DateUpdated string `json:"dateUpdated"`
 }
 
 // deltasSince reads cves/deltaLog.json at commit, newest entry first, and
@@ -99,38 +100,58 @@ type change struct {
 // downloads only the head of the 35 MB file. complete reports that it
 // reached such an entry: if not, the log no longer goes back to since, and
 // records changed in between are missing.
-func (s *syncer) deltasSince(ctx context.Context, commit string, since time.Time) (deltas []delta, complete bool, err error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.rawBase+commit+"/cves/deltaLog.json", nil)
+//
+// Every entry read is also given to recent, for the view, and reading
+// carries on past since until recent is full, usually a few entries more.
+func (s *syncer) deltasSince(ctx context.Context, commit string, since time.Time, recent *recentChanges) (deltas []delta, complete bool, err error) {
+	err = s.scanDeltaLog(ctx, commit, func(e delta, t time.Time) bool {
+		recent.add(e)
+		if since.IsZero() || t.After(since) {
+			deltas = append(deltas, e)
+		} else {
+			complete = true
+		}
+		return !complete || !recent.full()
+	})
 	if err != nil {
 		return nil, false, err
+	}
+	return deltas, complete || since.IsZero(), nil
+}
+
+// scanDeltaLog streams cves/deltaLog.json at commit, newest entry first,
+// to visit until it returns false, then hangs up.
+func (s *syncer) scanDeltaLog(ctx context.Context, commit string, visit func(e delta, fetchTime time.Time) bool) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.rawBase+commit+"/cves/deltaLog.json", nil)
+	if err != nil {
+		return err
 	}
 	resp, err := s.github.Do(req)
 	if err != nil {
-		return nil, false, err
+		return err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, false, fmt.Errorf("deltaLog.json: HTTP %d", resp.StatusCode)
+		return fmt.Errorf("deltaLog.json: HTTP %d", resp.StatusCode)
 	}
 	d := json.NewDecoder(resp.Body)
 	if tok, err := d.Token(); err != nil || tok != json.Delim('[') {
-		return nil, false, fmt.Errorf("deltaLog.json: not an array: %v", err)
+		return fmt.Errorf("deltaLog.json: not an array: %v", err)
 	}
 	for d.More() {
 		var e delta
 		if err := d.Decode(&e); err != nil {
-			return nil, false, fmt.Errorf("deltaLog.json: %w", err)
+			return fmt.Errorf("deltaLog.json: %w", err)
 		}
 		t, err := time.Parse(time.RFC3339Nano, e.FetchTime)
 		if err != nil {
-			return nil, false, fmt.Errorf("deltaLog.json: fetchTime %q: %w", e.FetchTime, err)
+			return fmt.Errorf("deltaLog.json: fetchTime %q: %w", e.FetchTime, err)
 		}
-		if !since.IsZero() && !t.After(since) {
-			return deltas, true, nil
+		if !visit(e, t) {
+			return nil
 		}
-		deltas = append(deltas, e)
 	}
-	return deltas, since.IsZero(), nil
+	return nil
 }
 
 // fetchRecord returns the record at path in commit, or nil if it isn't

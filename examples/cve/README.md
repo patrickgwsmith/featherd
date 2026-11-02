@@ -22,6 +22,8 @@ cve-sync                    github.com / raw.githubusercontent.com      featherd
   │ for each record new or updated since T0, once, -parallel at a time:     │
   │   GET C1/cves/2026/120xxx/CVE-2026-120339.json ──▶│                     │
   │   PUT cves/2026/120xxx/CVE-2026-120339.json ──────────────────────────▶│
+  │ GET each of the newest -view CVEs in deltaLog ────────────────────────▶│ (read back for titles)
+  │ PUT view/index.html, view/feed.xml ───────────────────────────────────▶│
   │ PUT mut/sync commit=C1 fetch_time=T1   If-Match: E ───────────────────▶│ ← commit point
 ```
 
@@ -30,6 +32,8 @@ cve-sync                    github.com / raw.githubusercontent.com      featherd
 ```
 cve bucket  →  data/cve.sqlite3
 ├── cves/{year}/{n/1000}xxx/CVE-{year}-{n}.json   one record, as in the repository
+├── view/index.html                              the newest new or updated CVEs
+├── view/feed.xml                                the same, as an Atom feed
 └── mut/sync                                     the commit and newest delta synced
 ```
 
@@ -53,6 +57,32 @@ synced_at=2026-11-02T04:18:49Z
 - **Keys come only from `recordPath`**, which accepts nothing but
   `cves/YYYY/NNNxxx/CVE-YYYY-N.json`, so `deltaLog.json` can't write
   anywhere else in the bucket.
+
+## The view
+
+Each sync also writes the newest `-view` (default 100) CVEs that
+`deltaLog.json` lists as new or updated to `view/index.html`, and the same
+as an Atom feed to `view/feed.xml`. They're a projection, rewritten with
+plain `PUT`s on every sync:
+
+- **From the same read.** `deltaLog.json` is read on past the last sync's
+  delta until the view is full, usually only a few more hourly entries.
+  Each CVE appears once, at its newest listing, as *new* or *updated*.
+- **Titles come from the bucket.** Each record is read back from featherd,
+  not GitHub, for its title (or first line of its description), CVSS
+  severity (the CNA's newest version, else an ADP's such as CISA's),
+  assigner, dates, and whether it's rejected. A record that isn't in the
+  bucket is left out, so an unseeded bucket's view only covers what it has.
+- **Atom, for updates.** Each entry's `<id>` is the CVE's cve.org URL and
+  its `<updated>` the record's `dateUpdated`, so a reader shows an updated
+  CVE as the same entry changed, not a new one. Entries have a `new` or
+  `updated` category, plus `rejected`, and link to cve.org and to the
+  record's JSON at the commit.
+- **Before the state.** The view is written before `mut/sync`, so a failed
+  write is retried by the next run. An up-to-date run writes it only if
+  `view/feed.xml` is missing, as in a bucket that was just seeded.
+- The page is rendered with `html/template` and the feed with
+  `encoding/xml`, so a record's text can't inject markup.
 
 ## Limits
 
@@ -115,6 +145,7 @@ make sync
 # cve-sync: up to date at 8c0afd8e6690
 
 curl -s http://127.0.0.1:8333/cve/cves/2024/3xxx/CVE-2024-3094.json
+open http://127.0.0.1:8333/cve/view/index.html
 ```
 
 | target      | does                                                                  |
@@ -156,8 +187,8 @@ ssh featherd.exe.xyz bash -s -- cve < examples/deploy.sh
 
 Each run checks for `mut/sync`. If it's missing, the run first does
 `make seed` and then deletes the zip, so the server needs about 650 MB free
-once. Every run then does `cve-sync -once`, and `mut/sync` is published at
-`:8000/cve/sync.txt`. Because the seed happens inside the first run, the
+once. Every run then does `cve-sync -once`. The view is published at `:8000/cve/` (and
+`:8000/cve/feed.xml`), and `mut/sync` at `:8000/cve/sync.txt`. Because the seed happens inside the first run, the
 deploy's first run takes a few minutes.
 
 ## Notes
@@ -167,5 +198,8 @@ deploy's first run takes a few minutes.
   run, a failed record leaving the state alone, a record missing at the
   commit, a gap, and two syncers racing on `mut/sync`. For seeding, it
   covers a nested zip like the release's, the sync picking up after it,
-  refusing a synced bucket, and a bad record leaving no state.
+  refusing a synced bucket, and a bad record leaving no state. For the
+  view, it covers the page and feed's contents, order and escaping, reading
+  past the last sync to fill the view, and writing a missing view once on
+  an up-to-date run.
 - `s3.go` is rss-reader's client without LIST.

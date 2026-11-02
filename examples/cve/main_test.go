@@ -124,8 +124,9 @@ func record(id, title string) string {
 // deltaLog builds cves/deltaLog.json, newest first as cvelistV5 writes it.
 func deltaLog(entries ...delta) string {
 	type c struct {
-		CVEID      string `json:"cveId"`
-		GitHubLink string `json:"githubLink"`
+		CVEID       string `json:"cveId"`
+		GitHubLink  string `json:"githubLink"`
+		DateUpdated string `json:"dateUpdated"`
 	}
 	type d struct {
 		FetchTime string `json:"fetchTime"`

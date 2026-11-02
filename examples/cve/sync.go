@@ -23,6 +23,7 @@ type syncer struct {
 	now      func() time.Time
 	log      *log.Logger
 	parallel int
+	viewSize int // CVEs in view/index.html and view/feed.xml
 }
 
 // stateKey holds what the last sync reached. It's the commit point: it's
@@ -109,10 +110,13 @@ func (s *syncer) sync(ctx context.Context) (syncResult, error) {
 	res := syncResult{Commit: head, First: st.Commit == ""}
 	if head == st.Commit {
 		res.UpToDate = true
-		return res, nil
+		// The view is normally written with each sync, but one seeded
+		// bucket, or an older cve-sync's, has none until HEAD moves.
+		return res, s.ensureView(ctx, head)
 	}
 
-	deltas, complete, err := s.deltasSince(ctx, head, st.FetchTime)
+	recent := newRecentChanges(s.viewSize)
+	deltas, complete, err := s.deltasSince(ctx, head, st.FetchTime, recent)
 	if err != nil {
 		return res, err
 	}
@@ -144,6 +148,11 @@ func (s *syncer) sync(ctx context.Context) (syncResult, error) {
 	res.Stored, res.Missing = stored, missing
 	if err != nil {
 		// The state isn't moved, so the next run repeats these deltas.
+		return res, err
+	}
+	// The view is written before the state too, so a failed write is
+	// retried by the next run.
+	if err := s.writeView(ctx, head, recent); err != nil {
 		return res, err
 	}
 

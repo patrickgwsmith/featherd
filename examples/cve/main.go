@@ -37,13 +37,17 @@ func run(args []string, getenv func(string) string) error {
 	interval := fs.Duration("interval", 15*time.Minute, "time between syncs")
 	parallel := fs.Int("parallel", 8, "records fetched at once")
 	seedZip := fs.String("seed", "", "store every record in a midnight zip `file`, then exit")
+	viewSize := fs.Int("view", 100, "CVEs in view/index.html and view/feed.xml")
 	fs.Usage = func() {
-		fmt.Fprintf(fs.Output(), `usage: cve-sync [-once] [-interval 15m] [-parallel 8]
+		fmt.Fprintf(fs.Output(), `usage: cve-sync [-once] [-interval 15m] [-parallel 8] [-view 100]
        cve-sync -seed FILE [-parallel 8]
 
 -seed stores every record in one of cvelistV5's daily
 *_all_CVEs_at_midnight.zip release assets, then sets mut/sync so the next
 sync applies only the deltas since. It refuses if mut/sync exists.
+
+Each sync also writes the newest new or updated CVEs to view/index.html
+and, as an Atom feed, view/feed.xml.
 
 Environment:
   FEATHERD               featherd's URL (default http://127.0.0.1:8333)
@@ -57,7 +61,7 @@ Environment:
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if fs.NArg() > 0 || *parallel < 1 || *interval <= 0 {
+	if fs.NArg() > 0 || *parallel < 1 || *interval <= 0 || *viewSize < 1 {
 		fs.Usage()
 		return flag.ErrHelp
 	}
@@ -65,6 +69,7 @@ Environment:
 	if err != nil {
 		return err
 	}
+	s.viewSize = *viewSize
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -132,5 +137,6 @@ func newSyncer(getenv func(string) string, parallel int) (*syncer, error) {
 		now:      time.Now,
 		log:      log.New(os.Stderr, "cve-sync: ", log.LstdFlags),
 		parallel: parallel,
+		viewSize: 100,
 	}, nil
 }
