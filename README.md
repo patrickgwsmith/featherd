@@ -268,6 +268,9 @@ full list.
   time window) with `If-None-Match: *`, e.g. one confirmation email per
   address every 15 minutes, one run of a cron job per day or hour across
   many workers, and sweep old claims.
+- [`examples/cve`](examples/cve): mirror the CVEProject/cvelistV5 records,
+  fetching only those changed since the last sync, from HEAD's commit in
+  git's `info/refs` and `cves/deltaLog.json`.
 - [`examples/fonts`](examples/fonts): store official font releases (e.g.
   Inter) and look files up by version or by SHA-256 digest.
 - [`examples/oauth-client`](examples/oauth-client): sign in with GitHub,
