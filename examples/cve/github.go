@@ -100,18 +100,14 @@ type change struct {
 // downloads only the head of the 35 MB file. complete reports that it
 // reached such an entry: if not, the log no longer goes back to since, and
 // records changed in between are missing.
-//
-// Every entry read is also given to recent, for the view, and reading
-// carries on past since until recent is full, usually a few entries more.
-func (s *syncer) deltasSince(ctx context.Context, commit string, since time.Time, recent *recentChanges) (deltas []delta, complete bool, err error) {
+func (s *syncer) deltasSince(ctx context.Context, commit string, since time.Time) (deltas []delta, complete bool, err error) {
 	err = s.scanDeltaLog(ctx, commit, func(e delta, t time.Time) bool {
-		recent.add(e)
 		if since.IsZero() || t.After(since) {
 			deltas = append(deltas, e)
-		} else {
-			complete = true
+			return true
 		}
-		return !complete || !recent.full()
+		complete = true
+		return false
 	})
 	if err != nil {
 		return nil, false, err

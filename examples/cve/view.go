@@ -14,21 +14,37 @@ import (
 	"time"
 )
 
-// The view: the newest CVEs that deltaLog.json lists as new or updated, as
-// a page and an Atom feed. It's a projection of deltaLog.json at the commit
-// synced and the records in the bucket, so it's simply rewritten with
-// plain PUTs on each sync.
+// The views: the newest CVEs that deltaLog.json lists as new or updated,
+// and the newest of those rated HIGH or CRITICAL, each as a page and an
+// Atom feed. They're a projection of deltaLog.json at the commit synced and
+// the records in the bucket, so they're simply rewritten with plain PUTs
+// on each sync.
 const (
-	indexKey = "view/index.html"
-	feedKey  = "view/feed.xml"
+	indexKey    = "view/index.html"
+	feedKey     = "view/feed.xml"
+	highPageKey = "view/high.html"
+	highFeedKey = "view/high.xml"
 )
 
-// recentChanges collects the newest distinct CVEs from deltaLog entries
-// given newest first, so each CVE keeps its newest listing.
-type recentChanges struct {
-	max   int
-	seen  map[string]bool
-	items []recentChange
+// highWindow bounds how far back in deltaLog.json the high view looks, so
+// a bucket missing most records (one never seeded) doesn't read all 30
+// days on every sync.
+const highWindow = 7 * 24 * time.Hour
+
+// viewBatch is how many records are read back at once while scanning.
+const viewBatch = 64
+
+// viewScan collects the views from deltaLog entries given newest first.
+// Each CVE is taken once, at its newest listing, and its record is read
+// back from the bucket in batches, since only the record has its severity.
+type viewScan struct {
+	s       *syncer
+	seen    map[string]bool
+	pending []recentChange
+	listed  int       // CVEs taken, for the first view
+	all     []viewCVE // of the first viewSize CVEs taken
+	high    []viewCVE // HIGH or CRITICAL, up to viewSize
+	newest  time.Time // the first entry's fetchTime
 }
 
 type recentChange struct {
@@ -37,58 +53,48 @@ type recentChange struct {
 	DateUpdated time.Time // from deltaLog, if the record has none
 }
 
-func newRecentChanges(max int) *recentChanges {
-	return &recentChanges{max: max, seen: map[string]bool{}}
+func (v *viewScan) done() bool {
+	return v.listed >= v.s.viewSize && len(v.high) >= v.s.viewSize
 }
 
-func (r *recentChanges) full() bool { return len(r.items) >= r.max }
-
-func (r *recentChanges) add(e delta) {
+// add takes one entry's CVEs, reading back each full batch.
+func (v *viewScan) add(ctx context.Context, e delta) error {
 	for i, list := range [][]change{e.New, e.Updated} {
 		for _, c := range list {
-			if r.full() {
-				return
-			}
 			p, ok := recordPath(c)
-			if !ok || r.seen[p] {
+			if !ok || v.seen[p] {
 				continue
 			}
-			r.seen[p] = true
-			r.items = append(r.items, recentChange{CVEID: c.CVEID, Path: p, New: i == 0, DateUpdated: parseCVETime(c.DateUpdated)})
+			v.seen[p] = true
+			v.pending = append(v.pending, recentChange{CVEID: c.CVEID, Path: p, New: i == 0, DateUpdated: parseCVETime(c.DateUpdated)})
+			if len(v.pending) >= viewBatch {
+				if err := v.flush(ctx); err != nil {
+					return err
+				}
+			}
 		}
 	}
+	return nil
 }
 
-// ensureView writes the view from deltaLog.json at commit if it's missing.
-func (s *syncer) ensureView(ctx context.Context, commit string) error {
-	resp, err := s.s3.get(ctx, feedKey)
-	if err != nil || resp.status == http.StatusOK {
-		return err
+// flush reads the pending CVEs' records back from the bucket. A record
+// that isn't in the bucket, such as one missing at the commit, is left
+// out.
+func (v *viewScan) flush(ctx context.Context) error {
+	batch := v.pending
+	v.pending = nil
+	if v.done() {
+		return nil
 	}
-	recent := newRecentChanges(s.viewSize)
-	err = s.scanDeltaLog(ctx, commit, func(e delta, _ time.Time) bool {
-		recent.add(e)
-		return !recent.full()
-	})
-	if err != nil {
-		return err
-	}
-	return s.writeView(ctx, commit, recent)
-}
-
-// writeView reads each recent CVE's record back from the bucket and writes
-// view/index.html and view/feed.xml. A record that isn't in the bucket,
-// such as one missing at the commit, is left out.
-func (s *syncer) writeView(ctx context.Context, commit string, recent *recentChanges) error {
-	cves := make([]viewCVE, len(recent.items))
-	errs := make([]error, len(recent.items))
-	sem := make(chan struct{}, s.parallel)
+	cves := make([]viewCVE, len(batch))
+	errs := make([]error, len(batch))
+	sem := make(chan struct{}, v.s.parallel)
 	var wg sync.WaitGroup
-	for i, rc := range recent.items {
+	for i, rc := range batch {
 		wg.Go(func() {
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			resp, err := s.s3.get(ctx, rc.Path)
+			resp, err := v.s.s3.get(ctx, rc.Path)
 			if err != nil {
 				errs[i] = err
 				return
@@ -96,70 +102,143 @@ func (s *syncer) writeView(ctx context.Context, commit string, recent *recentCha
 			if resp.status != http.StatusOK {
 				return
 			}
-			v, err := newViewCVE(rc, resp.body)
+			c, err := newViewCVE(rc, resp.body)
 			if err != nil {
-				s.log.Printf("view: %s: %v; left out", rc.Path, err)
+				v.s.log.Printf("view: %s: %v; left out", rc.Path, err)
 				return
 			}
-			cves[i] = v
+			cves[i] = c
 		})
 	}
 	wg.Wait()
-
-	page := viewPage{Commit: commit, Generated: s.now().UTC()}
-	for i, v := range cves {
+	for i, c := range cves {
 		if errs[i] != nil {
 			return errs[i]
 		}
-		if v.ID != "" {
-			page.CVEs = append(page.CVEs, v)
+		if v.listed < v.s.viewSize {
+			v.listed++
+			if c.ID != "" {
+				v.all = append(v.all, c)
+			}
+		}
+		if c.High() && len(v.high) < v.s.viewSize {
+			v.high = append(v.high, c)
 		}
 	}
-	sort.SliceStable(page.CVEs, func(i, j int) bool {
-		a, b := page.CVEs[i], page.CVEs[j]
-		if !a.Updated.Equal(b.Updated) {
-			return a.Updated.After(b.Updated)
-		}
-		return a.ID > b.ID
-	})
+	return nil
+}
 
-	var html bytes.Buffer
-	if err := indexTemplate.Execute(&html, page); err != nil {
+// ensureView writes the views from deltaLog.json at commit if they're
+// missing.
+func (s *syncer) ensureView(ctx context.Context, commit string) error {
+	resp, err := s.s3.get(ctx, highFeedKey)
+	if err != nil || resp.status == http.StatusOK {
 		return err
 	}
-	feed, err := page.atom()
+	return s.writeView(ctx, commit)
+}
+
+// writeView reads deltaLog.json at commit, newest first, until both views
+// are full or it's highWindow past the newest entry, and writes them.
+// The first view usually needs only the newest few hourly entries; the
+// high view reads on further, as most CVEs aren't HIGH or CRITICAL, and
+// many get a score only later, from an ADP such as CISA's.
+func (s *syncer) writeView(ctx context.Context, commit string) error {
+	v := &viewScan{s: s, seen: map[string]bool{}}
+	var addErr error
+	err := s.scanDeltaLog(ctx, commit, func(e delta, t time.Time) bool {
+		if v.newest.IsZero() {
+			v.newest = t
+		} else if t.Before(v.newest.Add(-highWindow)) {
+			return false
+		}
+		addErr = v.add(ctx, e)
+		return addErr == nil && !v.done()
+	})
+	if err == nil {
+		err = addErr
+	}
+	if err == nil {
+		err = v.flush(ctx)
+	}
 	if err != nil {
 		return err
 	}
-	// The feed is written last: ensureView takes it as the whole view.
-	for _, f := range []struct {
-		key, contentType string
-		body             []byte
-	}{
-		{indexKey, "text/html; charset=utf-8", html.Bytes()},
-		{feedKey, "application/atom+xml; charset=utf-8", feed},
-	} {
-		if _, err := s.s3.put(ctx, f.key, f.contentType, f.body, "", ""); err != nil {
+
+	generated := s.now().UTC()
+	pages := []viewPage{
+		{
+			Commit: commit, Generated: generated, CVEs: v.all,
+			Title: "New and updated CVEs", About: "new or updated",
+			FeedID: "https://github.com/CVEProject/cvelistV5",
+			Page:   "./", Feed: "feed.xml", Other: "high.html", OtherTitle: "Only HIGH and CRITICAL",
+		},
+		{
+			Commit: commit, Generated: generated, CVEs: v.high,
+			Title: "New and updated HIGH and CRITICAL CVEs", About: "rated HIGH or CRITICAL and new or updated",
+			FeedID: "https://github.com/CVEProject/cvelistV5#high",
+			Page:   "high.html", Feed: "high.xml", Other: "./", OtherTitle: "All new and updated CVEs",
+		},
+	}
+	keys := [][2]string{{indexKey, feedKey}, {highPageKey, highFeedKey}}
+	// The high feed is written last: ensureView takes it as the whole view.
+	for i, page := range pages {
+		sortByUpdated(page.CVEs)
+		var html bytes.Buffer
+		if err := indexTemplate.Execute(&html, page); err != nil {
+			return err
+		}
+		feed, err := page.atom()
+		if err != nil {
+			return err
+		}
+		if _, err := s.s3.put(ctx, keys[i][0], "text/html; charset=utf-8", html.Bytes(), "", ""); err != nil {
+			return err
+		}
+		if _, err := s.s3.put(ctx, keys[i][1], "application/atom+xml; charset=utf-8", feed, "", ""); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
+func sortByUpdated(cves []viewCVE) {
+	sort.SliceStable(cves, func(i, j int) bool {
+		a, b := cves[i], cves[j]
+		if !a.Updated.Equal(b.Updated) {
+			return a.Updated.After(b.Updated)
+		}
+		return a.ID > b.ID
+	})
+}
+
 type viewPage struct {
 	Commit    string
 	Generated time.Time
 	CVEs      []viewCVE
+
+	Title, About string // About completes "The N newest CVE records …"
+	FeedID       string
+	Page, Feed   string // relative links to this page and its feed
+	Other        string // and to the other page
+	OtherTitle   string
 }
 
 // viewCVE is what the view shows of one record.
 type viewCVE struct {
-	ID, Title, Description, Assigner, Severity, Path string
-	New, Rejected                                    bool
-	Published, Updated                               time.Time
+	ID, Title, Description, Assigner, Path string
+	Severity                               string // "CRITICAL 9.8 (CVSS 3.1)"
+	Level                                  string // "critical", "high", "medium", "low" or "none"
+	New, Rejected                          bool
+	Published, Updated                     time.Time
 }
 
 func (v viewCVE) Link() string { return "https://www.cve.org/CVERecord?id=" + v.ID }
+
+// High reports a published CVE rated HIGH or CRITICAL.
+func (v viewCVE) High() bool {
+	return v.ID != "" && !v.Rejected && (v.Level == "high" || v.Level == "critical")
+}
 
 // cveRecord is the part of a CVE JSON 5 record the view reads.
 // https://github.com/CVEProject/cve-schema
@@ -215,12 +294,12 @@ func newViewCVE(rc recentChange, data []byte) (viewCVE, error) {
 		v.Title = firstLine(v.Description, 120)
 	}
 	// The CNA's score, else one an ADP such as CISA added.
-	v.Severity = severity(cna.Metrics)
+	v.Severity, v.Level = severity(cna.Metrics)
 	for _, adp := range rec.Containers.ADP {
 		if v.Severity != "" {
 			break
 		}
-		v.Severity = severity(adp.Metrics)
+		v.Severity, v.Level = severity(adp.Metrics)
 	}
 	return v, nil
 }
@@ -239,8 +318,10 @@ func english(vs []langValue) string {
 }
 
 // severity is the newest CVSS version's score in metrics, such as
-// "CRITICAL 10.0 (CVSS 3.1)".
-func severity(metrics []map[string]json.RawMessage) string {
+// "CRITICAL 10.0 (CVSS 3.1)", and its level, such as "critical". A score
+// with no baseSeverity gets the level of its range: CVSS 3 and 4's, and
+// CVSS 2's, which tops out at high.
+func severity(metrics []map[string]json.RawMessage) (label, level string) {
 	for _, version := range []struct{ key, name string }{
 		{"cvssV4_0", "4.0"}, {"cvssV3_1", "3.1"}, {"cvssV3_0", "3.0"}, {"cvssV2_0", "2.0"},
 	} {
@@ -256,14 +337,32 @@ func severity(metrics []map[string]json.RawMessage) string {
 			if json.Unmarshal(raw, &c) != nil || c.BaseScore == nil {
 				continue
 			}
-			s := fmt.Sprintf("%.1f (CVSS %s)", *c.BaseScore, version.name)
-			if c.BaseSeverity != "" {
-				s = strings.ToUpper(c.BaseSeverity) + " " + s
+			label = fmt.Sprintf("%.1f (CVSS %s)", *c.BaseScore, version.name)
+			level = strings.ToLower(c.BaseSeverity)
+			if level == "" {
+				level = scoreLevel(*c.BaseScore, version.key == "cvssV2_0")
 			}
-			return s
+			if c.BaseSeverity != "" {
+				label = strings.ToUpper(c.BaseSeverity) + " " + label
+			}
+			return label, level
 		}
 	}
-	return ""
+	return "", ""
+}
+
+func scoreLevel(score float64, v2 bool) string {
+	switch {
+	case score >= 9 && !v2:
+		return "critical"
+	case score >= 7:
+		return "high"
+	case score >= 4:
+		return "medium"
+	case score > 0 || v2:
+		return "low"
+	}
+	return "none"
 }
 
 func firstLine(s string, n int) string {
@@ -321,16 +420,16 @@ func (p viewPage) atom() ([]byte, error) {
 		Entries   []entry  `xml:"entry"`
 	}
 	f := feed{
-		ID:       "https://github.com/CVEProject/cvelistV5",
-		Title:    "New and updated CVEs",
-		Subtitle: fmt.Sprintf("The %d newest CVE records new or updated in cvelistV5, as of commit %s", len(p.CVEs), short(p.Commit)),
+		ID:       p.FeedID,
+		Title:    p.Title,
+		Subtitle: fmt.Sprintf("The %d newest CVE records %s in cvelistV5, as of commit %s", len(p.CVEs), p.About, short(p.Commit)),
 		Updated:  p.Generated.Format(time.RFC3339),
 		Author:   person{"CVE Program"},
 		// Relative, as the feed is published next to the page wherever
 		// that is.
 		Links: []link{
-			{Rel: "self", Type: "application/atom+xml", Href: "feed.xml"},
-			{Rel: "alternate", Type: "text/html", Href: "./"},
+			{Rel: "self", Type: "application/atom+xml", Href: p.Feed},
+			{Rel: "alternate", Type: "text/html", Href: p.Page},
 			{Rel: "via", Href: "https://github.com/CVEProject/cvelistV5"},
 		},
 		Generator: "featherd cve-sync",
@@ -393,16 +492,12 @@ var indexTemplate = template.Must(template.New("index").Funcs(template.FuncMap{
 	"iso":     func(t time.Time) string { return t.UTC().Format(time.RFC3339) },
 	"snippet": func(s string) string { return truncate(s, 400) },
 	"short":   short,
-	"level": func(sev string) string {
-		level, _, _ := strings.Cut(sev, " ")
-		return strings.ToLower(level)
-	},
 }).Parse(`<!doctype html>
 <html lang="en">
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>New and updated CVEs</title>
-<link rel="alternate" type="application/atom+xml" title="New and updated CVEs" href="feed.xml">
+<title>{{.Title}}</title>
+<link rel="alternate" type="application/atom+xml" title="{{.Title}}" href="{{.Feed}}">
 <style>
 body { font: 16px/1.5 system-ui, sans-serif; max-width: 46rem; margin: 2rem auto; padding: 0 1rem; color: #222; }
 article { border-bottom: 1px solid #ddd; padding: 0.75rem 0; }
@@ -421,13 +516,13 @@ p { margin: 0.25rem 0 0; }
 footer { color: #888; font-size: 0.8rem; margin-top: 1rem; }
 @media (prefers-color-scheme: dark) { body { background: #111; color: #ddd; } a { color: #8ab4f8; } article { border-color: #333; } .tag { background: #333; color: #ccc; } }
 </style>
-<h1>New and updated CVEs</h1>
-<p>The {{len .CVEs}} newest CVE records new or updated in <a href="https://github.com/CVEProject/cvelistV5">cvelistV5</a>. Also as an <a href="feed.xml">Atom feed</a>.</p>
+<h1>{{.Title}}</h1>
+<p>The {{len .CVEs}} newest CVE records {{.About}} in <a href="https://github.com/CVEProject/cvelistV5">cvelistV5</a>. Also as an <a href="{{.Feed}}">Atom feed</a>. <a href="{{.Other}}">{{.OtherTitle}}</a>.</p>
 {{range .CVEs}}<article>
 <h2><a class="id" href="{{.Link}}">{{.ID}}</a> {{.Title}}</h2>
 <div class="meta">{{if .New}}<span class="tag new">new</span>{{else}}<span class="tag">updated</span>{{end}}
 {{- if .Rejected}} <span class="tag rejected">rejected</span>{{end}}
-{{- with .Severity}} <span class="tag {{level .}}">{{.}}</span>{{end}}
+{{- if .Severity}} <span class="tag {{.Level}}">{{.Severity}}</span>{{end}}
 {{- with .Assigner}} · {{.}}{{end}}
 {{- if not .Updated.IsZero}} · <time datetime="{{iso .Updated}}">{{date .Updated}}</time>{{end}}</div>
 {{with .Description}}<p>{{snippet .}}</p>{{end}}

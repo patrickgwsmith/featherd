@@ -37,7 +37,7 @@ func run(args []string, getenv func(string) string) error {
 	interval := fs.Duration("interval", 15*time.Minute, "time between syncs")
 	parallel := fs.Int("parallel", 8, "records fetched at once")
 	seedZip := fs.String("seed", "", "store every record in a midnight zip `file`, then exit")
-	viewSize := fs.Int("view", 100, "CVEs in view/index.html and view/feed.xml")
+	viewSize := fs.Int("view", 100, "CVEs in each view")
 	fs.Usage = func() {
 		fmt.Fprintf(fs.Output(), `usage: cve-sync [-once] [-interval 15m] [-parallel 8] [-view 100]
        cve-sync -seed FILE [-parallel 8]
@@ -47,7 +47,8 @@ func run(args []string, getenv func(string) string) error {
 sync applies only the deltas since. It refuses if mut/sync exists.
 
 Each sync also writes the newest new or updated CVEs to view/index.html
-and, as an Atom feed, view/feed.xml.
+and, as an Atom feed, view/feed.xml, and the newest of those rated HIGH or
+CRITICAL to view/high.html and view/high.xml.
 
 Environment:
   FEATHERD               featherd's URL (default http://127.0.0.1:8333)

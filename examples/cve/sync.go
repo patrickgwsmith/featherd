@@ -23,7 +23,7 @@ type syncer struct {
 	now      func() time.Time
 	log      *log.Logger
 	parallel int
-	viewSize int // CVEs in view/index.html and view/feed.xml
+	viewSize int // CVEs in each view: index.html and feed.xml, high.html and high.xml
 }
 
 // stateKey holds what the last sync reached. It's the commit point: it's
@@ -115,8 +115,7 @@ func (s *syncer) sync(ctx context.Context) (syncResult, error) {
 		return res, s.ensureView(ctx, head)
 	}
 
-	recent := newRecentChanges(s.viewSize)
-	deltas, complete, err := s.deltasSince(ctx, head, st.FetchTime, recent)
+	deltas, complete, err := s.deltasSince(ctx, head, st.FetchTime)
 	if err != nil {
 		return res, err
 	}
@@ -150,9 +149,10 @@ func (s *syncer) sync(ctx context.Context) (syncResult, error) {
 		// The state isn't moved, so the next run repeats these deltas.
 		return res, err
 	}
-	// The view is written before the state too, so a failed write is
-	// retried by the next run.
-	if err := s.writeView(ctx, head, recent); err != nil {
+	// The view is written after the records, so it reads back their
+	// versions at head, and before the state, so a failed write is retried
+	// by the next run.
+	if err := s.writeView(ctx, head); err != nil {
 		return res, err
 	}
 

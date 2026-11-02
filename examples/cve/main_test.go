@@ -249,12 +249,14 @@ func TestSync(t *testing.T) {
 		t.Fatalf("state: %+v", st)
 	}
 
-	// Same HEAD: only info/refs is read.
+	// Same HEAD: only info/refs is read. (A sync reads deltaLog.json once
+	// for the deltas and once for the views, after storing.)
+	logReads := env.gh.fetched["cves/deltaLog.json"]
 	if res := env.sync(t); !res.UpToDate {
 		t.Fatalf("second sync: %+v", res)
 	}
-	if n := env.gh.fetched["cves/deltaLog.json"]; n != 1 {
-		t.Fatalf("deltaLog fetched %d times", n)
+	if n := env.gh.fetched["cves/deltaLog.json"]; n != logReads {
+		t.Fatalf("deltaLog fetched %d more times", n-logReads)
 	}
 
 	// A new delta: only its record is fetched; b is left alone.
