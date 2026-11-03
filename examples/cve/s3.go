@@ -17,7 +17,7 @@ import (
 )
 
 // s3Client speaks the small part of the S3 API cve-sync needs to featherd:
-// path-style object PUT and GET with conditional headers, and CreateBucket.
+// path-style object PUT, GET and HEAD with conditional headers, and CreateBucket.
 // It's rss-reader's client without LIST. Requests are signed with SigV4 when
 // a key pair is set, and sent unsigned otherwise, for FEATHERD_AUTH=none.
 type s3Client struct {
@@ -102,6 +102,14 @@ func (c *s3Client) get(ctx context.Context, key string) (*s3Response, error) {
 		return nil, err
 	}
 	return resp, expect("GET", key, resp, http.StatusOK, http.StatusNotFound)
+}
+
+func (c *s3Client) head(ctx context.Context, key string) (*s3Response, error) {
+	resp, err := c.do(ctx, http.MethodHead, key, nil, nil, nil)
+	if err != nil {
+		return nil, err
+	}
+	return resp, expect("HEAD", key, resp, http.StatusOK, http.StatusNotFound)
 }
 
 // put stores body at key with one condition, such as If-None-Match: * or

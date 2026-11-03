@@ -159,8 +159,9 @@ func TestEnsureView(t *testing.T) {
 			t.Fatalf("sync: %+v", res)
 		}
 	}
-	if n := env.gh.fetched["cves/deltaLog.json"]; n != 1 {
-		t.Fatalf("deltaLog fetched %d times; want 1", n)
+	// Once for the views and once to backfill the vendor indexes.
+	if n := env.gh.fetched["cves/deltaLog.json"]; n != 2 {
+		t.Fatalf("deltaLog fetched %d times; want 2", n)
 	}
 	if got := env.feed(t).Entries; len(got) != 1 || got[0].Title != "CVE-2026-0001: a" {
 		t.Fatalf("view: %+v", got)

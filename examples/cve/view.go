@@ -128,14 +128,32 @@ func (v *viewScan) flush(ctx context.Context) error {
 	return nil
 }
 
-// ensureView writes the views from deltaLog.json at commit if they're
-// missing.
-func (s *syncer) ensureView(ctx context.Context, commit string) error {
-	resp, err := s.s3.get(ctx, highFeedKey)
-	if err != nil || resp.status == http.StatusOK {
+// ensureView writes the views at commit that are missing, on a run where
+// cvelistV5 hasn't moved: the vendor views also when their index was
+// just backfilled, or OSV changed.
+func (s *syncer) ensureView(ctx context.Context, commit string, osv map[string][]string, osvChanged bool, res *syncResult) error {
+	resp, err := s.s3.head(ctx, highFeedKey)
+	if err != nil {
 		return err
 	}
-	return s.writeView(ctx, commit)
+	if resp.status != http.StatusOK {
+		if err := s.writeView(ctx, commit); err != nil {
+			return err
+		}
+	}
+	backfilled, err := s.writeVendorIndexes(ctx, commit, newVendorChanges())
+	if err != nil {
+		return err
+	}
+	// The last vendor's feed is written last.
+	resp, err = s.s3.head(ctx, vendors[len(vendors)-1].feedKey())
+	if err != nil {
+		return err
+	}
+	if backfilled || osvChanged || resp.status != http.StatusOK {
+		return s.writeVendorViews(ctx, commit, nil, osv, res)
+	}
+	return nil
 }
 
 // writeView reads deltaLog.json at commit, newest first, until both views
@@ -171,36 +189,54 @@ func (s *syncer) writeView(ctx context.Context, commit string) error {
 			Commit: commit, Generated: generated, CVEs: v.all,
 			Title: "New and updated CVEs", About: "new or updated",
 			FeedID: "https://github.com/CVEProject/cvelistV5",
-			Page:   "./", Feed: "feed.xml", Other: "high.html", OtherTitle: "Only HIGH and CRITICAL",
+			Page:   "./", Feed: "feed.xml",
 		},
 		{
 			Commit: commit, Generated: generated, CVEs: v.high,
 			Title: "New and updated HIGH and CRITICAL CVEs", About: "rated HIGH or CRITICAL and new or updated",
 			FeedID: "https://github.com/CVEProject/cvelistV5#high",
-			Page:   "high.html", Feed: "high.xml", Other: "./", OtherTitle: "All new and updated CVEs",
+			Page:   "high.html", Feed: "high.xml",
 		},
 	}
 	keys := [][2]string{{indexKey, feedKey}, {highPageKey, highFeedKey}}
 	// The high feed is written last: ensureView takes it as the whole view.
 	for i, page := range pages {
-		sortByUpdated(page.CVEs)
-		var html bytes.Buffer
-		if err := indexTemplate.Execute(&html, page); err != nil {
-			return err
-		}
-		feed, err := page.atom()
-		if err != nil {
-			return err
-		}
-		if _, err := s.s3.put(ctx, keys[i][0], "text/html; charset=utf-8", html.Bytes(), "", ""); err != nil {
-			return err
-		}
-		if _, err := s.s3.put(ctx, keys[i][1], "application/atom+xml; charset=utf-8", feed, "", ""); err != nil {
+		if err := s.putView(ctx, page, keys[i][0], keys[i][1]); err != nil {
 			return err
 		}
 	}
 	return nil
 }
+
+// putView writes a view's page and its feed.
+func (s *syncer) putView(ctx context.Context, page viewPage, pageKey, feedKey string) error {
+	sortByUpdated(page.CVEs)
+	page.Nav = viewNav
+	var html bytes.Buffer
+	if err := indexTemplate.Execute(&html, page); err != nil {
+		return err
+	}
+	feed, err := page.atom()
+	if err != nil {
+		return err
+	}
+	if _, err := s.s3.put(ctx, pageKey, "text/html; charset=utf-8", html.Bytes(), "", ""); err != nil {
+		return err
+	}
+	_, err = s.s3.put(ctx, feedKey, "application/atom+xml; charset=utf-8", feed, "", "")
+	return err
+}
+
+// viewNav links every view from each page.
+var viewNav = func() []navLink {
+	nav := []navLink{{"./", "All"}, {"high.html", "HIGH and CRITICAL"}}
+	for _, v := range vendors {
+		nav = append(nav, navLink{v.Name + ".html", v.Title})
+	}
+	return nav
+}()
+
+type navLink struct{ Href, Title string }
 
 func sortByUpdated(cves []viewCVE) {
 	sort.SliceStable(cves, func(i, j int) bool {
@@ -220,8 +256,7 @@ type viewPage struct {
 	Title, About string // About completes "The N newest CVE records …"
 	FeedID       string
 	Page, Feed   string // relative links to this page and its feed
-	Other        string // and to the other page
-	OtherTitle   string
+	Nav          []navLink
 }
 
 // viewCVE is what the view shows of one record.
@@ -231,6 +266,7 @@ type viewCVE struct {
 	Level                                  string // "critical", "high", "medium", "low" or "none"
 	New, Rejected                          bool
 	Published, Updated                     time.Time
+	Refs                                   []viewRef // in the vendor views
 }
 
 func (v viewCVE) Link() string { return "https://www.cve.org/CVERecord?id=" + v.ID }
@@ -446,6 +482,9 @@ func (p viewPage) atom() ([]byte, error) {
 				{Rel: "related", Type: "application/json", Href: "https://raw.githubusercontent.com/CVEProject/cvelistV5/" + p.Commit + "/" + v.Path},
 			},
 		}
+		for _, r := range v.Refs {
+			e.Links = append(e.Links, link{Rel: "related", Type: "text/html", Href: r.URL})
+		}
 		if v.Title == "" {
 			e.Title.Body = v.ID
 		}
@@ -513,11 +552,14 @@ a { color: #0645ad; text-decoration: none; }
 .medium { background: #fef3c7; color: #92400e; }
 .low, .none { background: #dcfce7; color: #166534; }
 p { margin: 0.25rem 0 0; }
+nav { font-size: 0.9rem; margin-bottom: 0.5rem; }
+.refs { font-size: 0.85rem; }
 footer { color: #888; font-size: 0.8rem; margin-top: 1rem; }
 @media (prefers-color-scheme: dark) { body { background: #111; color: #ddd; } a { color: #8ab4f8; } article { border-color: #333; } .tag { background: #333; color: #ccc; } }
 </style>
 <h1>{{.Title}}</h1>
-<p>The {{len .CVEs}} newest CVE records {{.About}} in <a href="https://github.com/CVEProject/cvelistV5">cvelistV5</a>. Also as an <a href="{{.Feed}}">Atom feed</a>. <a href="{{.Other}}">{{.OtherTitle}}</a>.</p>
+<nav>{{range $i, $n := .Nav}}{{if $i}} · {{end}}{{if eq $n.Href $.Page}}<strong>{{$n.Title}}</strong>{{else}}<a href="{{$n.Href}}">{{$n.Title}}</a>{{end}}{{end}}</nav>
+<p>The {{len .CVEs}} newest CVE records {{.About}} in <a href="https://github.com/CVEProject/cvelistV5">cvelistV5</a>. Also as an <a href="{{.Feed}}">Atom feed</a>.</p>
 {{range .CVEs}}<article>
 <h2><a class="id" href="{{.Link}}">{{.ID}}</a> {{.Title}}</h2>
 <div class="meta">{{if .New}}<span class="tag new">new</span>{{else}}<span class="tag">updated</span>{{end}}
@@ -526,6 +568,7 @@ footer { color: #888; font-size: 0.8rem; margin-top: 1rem; }
 {{- with .Assigner}} · {{.}}{{end}}
 {{- if not .Updated.IsZero}} · <time datetime="{{iso .Updated}}">{{date .Updated}}</time>{{end}}</div>
 {{with .Description}}<p>{{snippet .}}</p>{{end}}
+{{with .Refs}}<p class="refs">{{range $i, $r := .}}{{if $i}} · {{end}}<a href="{{$r.URL}}">{{$r.Title}}</a>{{end}}</p>{{end}}
 </article>
 {{else}}<p>No CVEs yet.</p>
 {{end}}<footer>Built {{date .Generated}} from cvelistV5 at <span class="id">{{short .Commit}}</span> by cve-sync.</footer>

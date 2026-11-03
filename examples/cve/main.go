@@ -48,7 +48,11 @@ sync applies only the deltas since. It refuses if mut/sync exists.
 
 Each sync also writes the newest new or updated CVEs to view/index.html
 and, as an Atom feed, view/feed.xml, and the newest of those rated HIGH or
-CRITICAL to view/high.html and view/high.xml.
+CRITICAL to view/high.html and view/high.xml. view/apple.html and
+view/android.html, with feeds, list the newest CVEs those CNAs assigned,
+linked to the Apple security notes and Android bulletins they cite, which
+are mirrored as raw HTML under refs/. OSV's Android entries are mirrored
+to refs/osv/Android/.
 
 Environment:
   FEATHERD               featherd's URL (default http://127.0.0.1:8333)
@@ -132,7 +136,9 @@ func newSyncer(getenv func(string) string, parallel int) (*syncer, error) {
 			now:  time.Now,
 		},
 		// The first run reads all of deltaLog.json, about 35 MB.
-		github:   &http.Client{Timeout: 5 * time.Minute},
+		github: &http.Client{Timeout: 5 * time.Minute},
+		// OSV's all.zip is about 10 MB.
+		web:      &http.Client{Timeout: 2 * time.Minute},
 		refsURL:  "https://github.com/CVEProject/cvelistV5.git/info/refs?service=git-upload-pack",
 		rawBase:  "https://raw.githubusercontent.com/CVEProject/cvelistV5/",
 		now:      time.Now,

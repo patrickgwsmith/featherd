@@ -81,6 +81,26 @@ type fakeGitHub struct {
 	broken  map[string]bool
 	fetched map[string]int
 	onRefs  func() // called before answering info/refs
+	// web serves the vendor pages and OSV, by host and path, through
+	// webTransport.
+	web map[string]webPage
+}
+
+type webPage struct {
+	contentType, etag, body string
+}
+
+// webTransport sends every request to the fake, under /web/<host><path>.
+type webTransport struct{ base string }
+
+func (t webTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	r = r.Clone(r.Context())
+	u := *r.URL
+	r.URL, r.Host = &u, ""
+	u.Path = "/web/" + r.URL.Host + u.Path
+	base, _ := http.NewRequest("GET", t.base, nil)
+	u.Scheme, u.Host = base.URL.Scheme, base.URL.Host
+	return http.DefaultTransport.RoundTrip(r)
 }
 
 func (g *fakeGitHub) commit(sha string, files map[string]string) {
@@ -96,6 +116,24 @@ func (g *fakeGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	if hostPath, ok := strings.CutPrefix(r.URL.Path, "/web/"); ok {
+		g.fetched[hostPath]++
+		p, ok := g.web[hostPath]
+		if !ok || g.broken[hostPath] {
+			http.NotFound(w, r)
+			return
+		}
+		if p.etag != "" {
+			if r.Header.Get("If-None-Match") == p.etag {
+				w.WriteHeader(http.StatusNotModified)
+				return
+			}
+			w.Header().Set("ETag", p.etag)
+		}
+		w.Header().Set("Content-Type", p.contentType)
+		io.WriteString(w, p.body)
+		return
+	}
 	if r.URL.Path == "/info/refs" {
 		pkt := func(s string) string { return fmt.Sprintf("%04x%s", len(s)+4, s) }
 		io.WriteString(w, pkt("# service=git-upload-pack\n")+"0000"+
@@ -161,7 +199,7 @@ type testEnv struct {
 
 func newTestEnv(t *testing.T) *testEnv {
 	base := startFeatherd(t)
-	gh := &fakeGitHub{files: map[string]map[string]string{}, broken: map[string]bool{}, fetched: map[string]int{}}
+	gh := &fakeGitHub{files: map[string]map[string]string{}, broken: map[string]bool{}, fetched: map[string]int{}, web: map[string]webPage{}}
 	srv := httptest.NewServer(gh)
 	t.Cleanup(srv.Close)
 	env := map[string]string{"FEATHERD": base, "AWS_ACCESS_KEY_ID": testKeyID, "AWS_SECRET_ACCESS_KEY": testSecret}
@@ -170,6 +208,7 @@ func newTestEnv(t *testing.T) *testEnv {
 		t.Fatal(err)
 	}
 	s.refsURL, s.rawBase = srv.URL+"/info/refs", srv.URL+"/raw/"
+	s.web = &http.Client{Transport: webTransport{srv.URL}}
 	s.log = log.New(io.Discard, "", 0)
 	if err := s.s3.createBucket(context.Background()); err != nil {
 		t.Fatal(err)

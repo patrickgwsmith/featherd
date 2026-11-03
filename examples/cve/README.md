@@ -25,6 +25,9 @@ cve-sync                    github.com / raw.githubusercontent.com      featherd
   │ GET C1/cves/deltaLog.json again ──▶│ until both views are full          │
   │   GET each CVE listed, newest first ──────────────────────────────────▶│ (read back for titles, severity)
   │ PUT view/index.html, feed.xml, high.html, high.xml ───────────────────▶│
+  │ PUT mut/vendor/apple, mut/vendor/android  (records those CNAs assigned) ▶│
+  │ GET support.apple.com, source.android.com pages cited ──▶ PUT refs/… ──▶│
+  │ PUT view/apple.html, apple.xml, android.html, android.xml ────────────▶│
   │ PUT mut/sync commit=C1 fetch_time=T1   If-Match: E ───────────────────▶│ ← commit point
 ```
 
@@ -37,6 +40,13 @@ cve bucket  →  data/cve.sqlite3
 ├── view/feed.xml                                the same, as an Atom feed
 ├── view/high.html                               the newest of those rated HIGH or CRITICAL
 ├── view/high.xml                                the same, as an Atom feed
+├── view/apple.html, view/apple.xml              the newest CVEs Apple assigned, with their notes
+├── view/android.html, view/android.xml          the same for Android, with bulletins and OSV
+├── refs/support.apple.com/en-us/122716.html     an Apple security note, raw HTML as served
+├── refs/source.android.com/docs/security/bulletin/2026/2026-06-01.html
+├── refs/osv/Android/ASB-A-351830787.json        an OSV Android entry, as served
+├── mut/vendor/apple, mut/vendor/android         each vendor's records, newest first
+├── mut/osv/Android                              OSV's newest modified, ETag, and aliases
 └── mut/sync                                     the commit and newest delta synced
 ```
 
@@ -104,6 +114,44 @@ They're a projection, rewritten with plain `PUT`s on every sync:
   seeded.
 - The page is rendered with `html/template` and the feed with
   `encoding/xml`, so a record's text can't inject markup.
+
+## Vendor views and pages
+
+`view/apple.html` and `view/android.html`, each with an Atom feed, list the
+newest `-view` CVEs assigned by Apple's CNA (`apple`) and Android's
+(`google_android`). Each CVE links the Apple security notes or Android
+bulletins it cites, titled from the page itself ("About the security
+content of iOS 27.2 and iPadOS 27.2", "Android Security Bulletin—November
+2026"), which ties it to the OS release that fixed it. Android CVEs also
+link the OSV entries that alias them.
+
+- **An index per vendor.** `deltaLog.json` doesn't say who assigned a CVE,
+  so `mut/vendor/<name>` lists each vendor's records, newest
+  `dateUpdated` first, up to 1,000. It's updated as records are stored,
+  so the views aren't limited to `deltaLog.json`'s 30 days. A seed builds
+  it from every record. A bucket without one, such as one synced before
+  the vendor views, is backfilled once from the 30 days `deltaLog.json`
+  covers.
+- **Pages are mirrored raw** under `refs/<host><path>.html`. Only Apple
+  note URLs (`support.apple.com/en-us/122716`, `/kb/HT213670`) and Android
+  bulletin URLs (`source.android.com/docs/security/bulletin/…`; older URLs
+  without `/docs/` map to the same key) are mirrored, so nothing a record
+  cites can write anywhere else.
+- **Refreshing.** A page is fetched again whenever a record citing it is
+  stored, since vendors revise their notes as they add or update CVEs. It
+  isn't written again if its sha256 matches featherd's ETag. A page a view
+  shows that isn't mirrored yet is fetched then. A seed fetches no pages.
+- **OSV Android** is mirrored entry for entry to `refs/osv/Android/`. Its
+  entries are per Android bug (`ASB-A-…`, `PUB-A-…` for Pixel), not per
+  bulletin, and CVE records don't name the bug, so `mut/osv/Android` keeps
+  each entry's CVE aliases. The first run reads OSV's `all.zip` (one ~10 MB
+  request). After that, every run, whether or not cvelistV5 moved,
+  revalidates `modified_id.csv` with its ETag and fetches only the entries
+  modified since. If more than 500 changed, it reads `all.zip` again.
+- **Failures don't hold up the CVEs.** If a vendor site or OSV fails, the
+  sync logs it, reports it in its summary line, and still commits. A page
+  that's still missing is fetched by the next sync that shows it. OSV's
+  state doesn't move, so the next run fetches those entries again.
 
 ## Limits
 
@@ -209,7 +257,10 @@ ssh featherd.exe.xyz bash -s -- cve < examples/deploy.sh
 Each run checks for `mut/sync`. If it's missing, the run first does
 `make seed` and then deletes the zip, so the server needs about 650 MB free
 once. Every run then does `cve-sync -once`. The views are published at `:8000/cve/` (and
-`:8000/cve/feed.xml`) and `:8000/cve/high.html` (and `:8000/cve/high.xml`), and `mut/sync` at `:8000/cve/sync.txt`. Because the seed happens inside the first run, the
+`:8000/cve/feed.xml`), `:8000/cve/high.html`, `:8000/cve/apple.html` and
+`:8000/cve/android.html` (each with its `.xml` feed), and `mut/sync` at
+`:8000/cve/sync.txt`. The mirrored pages under `refs/` stay in the bucket;
+they're not published. Because the seed happens inside the first run, the
 deploy's first run takes a few minutes.
 
 ## Notes
@@ -226,4 +277,9 @@ deploy's first run takes a few minutes.
   CRITICAL (including unlabelled CVSS 2 scores), leaving out rejected
   ones, reading further back than the first view, the week's cutoff, an
   ADP score arriving in an update, and adding the view to an older bucket.
-- `s3.go` is rss-reader's client without LIST.
+  For the vendor views, it covers the vendor pages and OSV entries
+  mirrored and linked, refetching only the pages cited by changed records,
+  OSV revalidation and incremental fetches, a vendor site failing without
+  failing the sync, a seed building the indexes, and which URLs map to
+  which keys.
+- `s3.go` is rss-reader's client without LIST, plus HEAD.

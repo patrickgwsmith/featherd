@@ -18,8 +18,9 @@ import (
 type syncer struct {
 	s3       *s3Client
 	github   *http.Client
-	refsURL  string // git's info/refs for cvelistV5
-	rawBase  string // raw.githubusercontent.com/…/cvelistV5/, + commit/path
+	web      *http.Client // for vendor pages and OSV
+	refsURL  string       // git's info/refs for cvelistV5
+	rawBase  string       // raw.githubusercontent.com/…/cvelistV5/, + commit/path
 	now      func() time.Time
 	log      *log.Logger
 	parallel int
@@ -72,12 +73,30 @@ type syncResult struct {
 	Errors   int  // listed under "error" by cvelistV5
 	Gap      bool // deltaLog didn't reach back to the last sync
 	First    bool // no earlier sync, so only deltaLog's 30 days
+
+	RefsFetched, RefsStored, RefsFailed int // vendor pages: fetched, changed, failed
+	OSVStored                           int // OSV Android entries stored
+	OSVErr                              error
 }
 
 func (r syncResult) String() string {
-	if r.UpToDate {
-		return "up to date at " + short(r.Commit)
+	s := "up to date at " + short(r.Commit)
+	if !r.UpToDate {
+		s = r.syncedString()
 	}
+	if r.RefsFetched+r.RefsFailed > 0 {
+		s += fmt.Sprintf("; %d vendor pages fetched (%d changed, %d failed)", r.RefsFetched+r.RefsFailed, r.RefsStored, r.RefsFailed)
+	}
+	if r.OSVStored > 0 {
+		s += fmt.Sprintf("; %d OSV Android entries stored", r.OSVStored)
+	}
+	if r.OSVErr != nil {
+		s += fmt.Sprintf("; OSV Android not updated: %v", r.OSVErr)
+	}
+	return s
+}
+
+func (r syncResult) syncedString() string {
 	s := fmt.Sprintf("synced %s: %d deltas, %d records stored, %d missing, %d upstream errors",
 		short(r.Commit), r.Deltas, r.Stored, r.Missing, r.Errors)
 	switch {
@@ -108,11 +127,21 @@ func (s *syncer) sync(ctx context.Context) (syncResult, error) {
 		return syncResult{}, err
 	}
 	res := syncResult{Commit: head, First: st.Commit == ""}
+	// OSV is updated on every run, whether or not cvelistV5 moved; it's one
+	// revalidated request when nothing changed. A failure is reported but
+	// doesn't hold up the CVEs.
+	osv, osvChanged, err := s.syncOSV(ctx, &res)
+	if err != nil {
+		if isS3Error(err) {
+			return res, err
+		}
+		res.OSVErr = err
+	}
 	if head == st.Commit {
 		res.UpToDate = true
-		// The view is normally written with each sync, but one seeded
+		// The views are normally written with each sync, but a seeded
 		// bucket, or an older cve-sync's, has none until HEAD moves.
-		return res, s.ensureView(ctx, head)
+		return res, s.ensureView(ctx, head, osv, osvChanged, &res)
 	}
 
 	deltas, complete, err := s.deltasSince(ctx, head, st.FetchTime)
@@ -143,7 +172,8 @@ func (s *syncer) sync(ctx context.Context) (syncResult, error) {
 	}
 	sort.Strings(sorted)
 
-	stored, missing, err := s.storeAll(ctx, head, sorted)
+	vc := newVendorChanges()
+	stored, missing, err := s.storeAll(ctx, head, sorted, vc)
 	res.Stored, res.Missing = stored, missing
 	if err != nil {
 		// The state isn't moved, so the next run repeats these deltas.
@@ -153,6 +183,12 @@ func (s *syncer) sync(ctx context.Context) (syncResult, error) {
 	// versions at head, and before the state, so a failed write is retried
 	// by the next run.
 	if err := s.writeView(ctx, head); err != nil {
+		return res, err
+	}
+	if _, err := s.writeVendorIndexes(ctx, head, vc); err != nil {
+		return res, err
+	}
+	if err := s.writeVendorViews(ctx, head, vc.refs, osv, &res); err != nil {
 		return res, err
 	}
 
@@ -174,7 +210,7 @@ func (s *syncer) sync(ctx context.Context) (syncResult, error) {
 // storeAll fetches each record at commit and PUTs it at the same path.
 // PUTs are unconditional: a record listed again is simply replaced with
 // its version at commit, which is the newest.
-func (s *syncer) storeAll(ctx context.Context, commit string, paths []string) (stored, missing int, err error) {
+func (s *syncer) storeAll(ctx context.Context, commit string, paths []string, vc *vendorChanges) (stored, missing int, err error) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	var (
@@ -186,7 +222,7 @@ func (s *syncer) storeAll(ctx context.Context, commit string, paths []string) (s
 	for range min(s.parallel, max(len(paths), 1)) {
 		wg.Go(func() {
 			for p := range work {
-				ok, err := s.storeRecord(ctx, commit, p)
+				ok, err := s.storeRecord(ctx, commit, p, vc)
 				mu.Lock()
 				switch {
 				case err != nil:
@@ -220,7 +256,7 @@ feed:
 	return stored, missing, firstErr
 }
 
-func (s *syncer) storeRecord(ctx context.Context, commit, path string) (bool, error) {
+func (s *syncer) storeRecord(ctx context.Context, commit, path string, vc *vendorChanges) (bool, error) {
 	data, err := s.fetchRecord(ctx, commit, path)
 	if err != nil || data == nil {
 		return false, err
@@ -229,7 +265,11 @@ func (s *syncer) storeRecord(ctx context.Context, commit, path string) (bool, er
 	if err != nil {
 		return false, err
 	}
-	return resp.status == http.StatusOK, nil
+	if resp.status != http.StatusOK {
+		return false, nil
+	}
+	vc.add(path, data)
+	return true, nil
 }
 
 var (

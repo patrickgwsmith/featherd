@@ -74,9 +74,15 @@ func (s *syncer) seed(ctx context.Context, zipPath string) (seedResult, error) {
 	}
 	sort.Slice(files, func(i, j int) bool { return files[i].Name < files[j].Name })
 
-	newest, err := s.storeZipped(ctx, files)
+	vc := newVendorChanges()
+	newest, err := s.storeZipped(ctx, files, vc)
 	if err != nil {
 		// No state is written, so the seed can simply be run again.
+		return res, err
+	}
+	// Every record was just stored, so the vendor indexes are built from
+	// them, not backfilled; the pages they cite are fetched by the views.
+	if _, err := s.writeVendorIndexes(ctx, "", vc); err != nil {
 		return res, err
 	}
 	res.Stored = len(files)
@@ -138,7 +144,7 @@ func openRecordsZip(name string) (*zip.Reader, func(), error) {
 
 // storeZipped PUTs each record, -parallel at a time, and returns the
 // newest cveMetadata.dateUpdated among them.
-func (s *syncer) storeZipped(ctx context.Context, files []*zip.File) (time.Time, error) {
+func (s *syncer) storeZipped(ctx context.Context, files []*zip.File, vc *vendorChanges) (time.Time, error) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	var (
@@ -152,7 +158,7 @@ func (s *syncer) storeZipped(ctx context.Context, files []*zip.File) (time.Time,
 	for range min(s.parallel, len(files)) {
 		wg.Go(func() {
 			for f := range work {
-				updated, err := s.storeZippedRecord(ctx, f)
+				updated, err := s.storeZippedRecord(ctx, f, vc)
 				mu.Lock()
 				if err != nil {
 					if firstErr == nil {
@@ -191,7 +197,7 @@ feed:
 	return newest, firstErr
 }
 
-func (s *syncer) storeZippedRecord(ctx context.Context, f *zip.File) (time.Time, error) {
+func (s *syncer) storeZippedRecord(ctx context.Context, f *zip.File, vc *vendorChanges) (time.Time, error) {
 	if f.UncompressedSize64 > maxRecordBytes {
 		return time.Time{}, fmt.Errorf("%s: over %d bytes", f.Name, maxRecordBytes)
 	}
@@ -222,6 +228,7 @@ func (s *syncer) storeZippedRecord(ctx context.Context, f *zip.File) (time.Time,
 	if resp.status != http.StatusOK {
 		return time.Time{}, fmt.Errorf("PUT %s: HTTP %d", f.Name, resp.status)
 	}
+	vc.add(f.Name, data)
 	return parseCVETime(rec.CVEMetadata.DateUpdated), nil
 }
 
