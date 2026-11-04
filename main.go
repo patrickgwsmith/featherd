@@ -922,18 +922,28 @@ func (s *Store) readLocked(e entry, start, end int) ([]byte, error) {
 // etagLocked computes the ETag of an entry without metadata from its data,
 // which it reads in chunks rather than all at once.
 func (s *Store) etagLocked(e entry) (string, error) {
+	sum, err := s.digestLocked(e)
+	if err != nil {
+		return "", err
+	}
+	return etagOf(sum), nil
+}
+
+// digestLocked returns the SHA-256 digest of an entry's uncompressed data,
+// reading it in chunks rather than all at once.
+func (s *Store) digestLocked(e entry) ([]byte, error) {
 	h := sha256.New()
 	if e.stored > 0 {
 		blob, err := s.openBlobLocked(e.rowid)
 		if err != nil {
-			return "", err
+			return nil, err
 		}
 		defer blob.Close()
 		var r io.Reader = blob
 		if e.Compressed {
 			zr, err := zlib.NewReader(blob)
 			if err != nil {
-				return "", fmt.Errorf("key %q: inflate sqlar data: %w", e.Key, err)
+				return nil, fmt.Errorf("key %q: inflate sqlar data: %w", e.Key, err)
 			}
 			r = io.LimitReader(zr, int64(e.Size)+1)
 		}
@@ -942,10 +952,10 @@ func (s *Store) etagLocked(e entry) (string, error) {
 			err = fmt.Errorf("inflate sqlar data: got %d bytes, want %d", n, e.Size)
 		}
 		if err != nil {
-			return "", fmt.Errorf("key %q: %w", e.Key, err)
+			return nil, fmt.Errorf("key %q: %w", e.Key, err)
 		}
 	}
-	return etagOf(h.Sum(nil)), nil
+	return h.Sum(nil), nil
 }
 
 // inflate returns a sqlar entry's zlib data, which must hold size bytes, and
@@ -1664,6 +1674,7 @@ func newHandler(buckets Buckets) http.Handler {
 }
 
 const usage = `usage: featherd [options]
+       featherd rehash [options] FILE...   (see featherd rehash -h)
 
   --addr ADDR              listen address (default 127.0.0.1:8333)
   --dir DIR                directory holding one sqlite database per bucket (default data)
@@ -1748,6 +1759,9 @@ func parseArgs(args []string) (options, error) {
 }
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "rehash" {
+		os.Exit(runRehash(os.Args[2:], os.Stdout, os.Stderr))
+	}
 	opts, err := parseArgs(os.Args[1:])
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "featherd: %v\n\n%s", err, usage)

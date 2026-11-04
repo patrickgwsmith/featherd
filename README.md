@@ -257,6 +257,28 @@ Long options take two dashes, with the value after a space or `=`
 flags, so `-addr` is rejected as `unknown option -a`. Run `go run . -h` for the
 full list.
 
+### Rehash
+
+`featherd rehash FILE...` recomputes the sha256 of every object in a bucket
+database and fixes its `content_meta`:
+
+- An entry without a row, e.g. one added by `sqlite3 -A`, gets one. Its
+  content type is guessed from the key's extension.
+- A row whose sha256 doesn't match the data is corrected, and its content
+  type is kept.
+- If the triggers are missing, `content_meta` can't be trusted, so it is
+  rebuilt with the triggers. Content types are guessed again.
+
+```sh
+go run . rehash --dry-run data/cve.sqlite3   # report only
+go run . rehash data/cve.sqlite3             # -v lists every row added
+```
+
+It commits every 500 entries or 64 MiB, so it can run while featherd serves
+the file. Each fix is printed, and so is an entry that can't be read, e.g.
+corrupt zlib data, which also makes the exit status 1. A file with no `sqlar`
+table is left alone.
+
 ## Examples
 
 - [`examples/atomic-publish`](examples/atomic-publish): publish a
