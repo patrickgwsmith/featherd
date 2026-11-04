@@ -11,6 +11,7 @@
 #
 #   bucket    its own bucket, $DATA/$bucket.sqlite3 [the example's name]
 #   seed      KEY=FILE pairs, each uploaded only while KEY is missing
+#   config    KEY=FILE pairs, each uploaded whenever KEY differs from FILE
 #   publish   KEY=PATH pairs, each copied to $WWW/<example>/PATH after a run
 #   check()   optional: stop with die if the server can't run it
 #   build()   optional: build it, writing any one binary to $bin
@@ -18,7 +19,7 @@
 #
 # Safe to run again: it pulls, rebuilds, rewrites only the files that
 # changed, restarts only what they affect, and never overwrites a seeded
-# key once it's in the bucket. Examples left off the command line keep
+# key once it's in the bucket (config keys are kept in step with the repo). Examples left off the command line keep
 # running; stop one with
 #   sudo systemctl disable --now featherd-example@<example>.timer
 #
@@ -235,6 +236,9 @@ main() {
 			for s in "${seed[@]}"; do
 				seed_key "${s%%=*}" "${s#*=}"
 			done
+			for s in "${config[@]}"; do
+				config_key "${s%%=*}" "${s#*=}"
+			done
 		) </dev/null
 	done
 
@@ -276,7 +280,7 @@ run_example() {
 # load NAME: change to examples/NAME and read its deploy.conf.
 load() {
 	cd "$SRC/examples/$1"
-	bucket=$1 bin=$SRC/bin/$1 seed=() publish=()
+	bucket=$1 bin=$SRC/bin/$1 seed=() config=() publish=()
 	unset -f check build run
 	. ./deploy.conf
 	declare -F run >/dev/null || die "examples/$1/deploy.conf defines no run"
@@ -295,6 +299,19 @@ seed_key() {
 			;;
 		*) die "checking $bucket/$1 returned HTTP $status" ;;
 	esac
+}
+
+# config_key KEY FILE: upload FILE to KEY in $bucket unless KEY already
+# holds the same bytes. featherd's ETag is the quoted sha256 of the body.
+config_key() {
+	local url=$FEATHERD/$bucket/$1 want have
+	want=$(sha256sum "$2") || die "couldn't hash $2"
+	want=${want%% *}
+	have=$(fcurl -sS -I "$url" | tr -d '\r' | sed -n 's/^[Ee][Tt][Aa][Gg]: *"\(.*\)"$/\1/p') ||
+		die "couldn't check $bucket/$1"
+	[[ $have == "$want" ]] && return
+	log "uploading $2 to $bucket/$1"
+	fcurl -fsS -o /dev/null -T "$2" "$url" || die "couldn't upload $bucket/$1"
 }
 
 # fcurl ARG...: curl a featherd URL, signed with SigV4 when the key pair

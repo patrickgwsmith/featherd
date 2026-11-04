@@ -6,5 +6,7 @@
   <body>
     <outline type="rss" text="MacRumors" xmlUrl="https://feeds.macrumors.com/MacRumors-All"/>
     <outline type="rss" text="Daring Fireball" xmlUrl="https://daringfireball.net/feeds/main"/>
+    <outline type="rss" text="Simon Willison's Weblog" xmlUrl="https://simonwillison.net/atom/everything/"/>
+    <outline type="rss" text="MacStories" xmlUrl="https://www.macstories.net/feed/"/>
   </body>
 </opml>
