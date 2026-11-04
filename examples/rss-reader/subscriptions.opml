@@ -10,5 +10,6 @@
     <outline type="rss" text="512 Pixels" xmlUrl="https://512pixels.net/feed.xml"/>
     <outline type="rss" text="Simon Willison's Weblog" xmlUrl="https://simonwillison.net/atom/everything/"/>
     <outline type="rss" text="MacStories" xmlUrl="https://www.macstories.net/feed/"/>
+    <outline type="rss" text="Michael Tsai" xmlUrl="https://mjtsai.com/blog/feed/"/>
   </body>
 </opml>
