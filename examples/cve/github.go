@@ -18,11 +18,16 @@ import (
 // snapshot of the repository.
 // https://git-scm.com/docs/http-protocol#_smart_clients
 func (s *syncer) headCommit(ctx context.Context) (string, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.refsURL, nil)
+	return s.refsHead(ctx, s.github, s.refsURL)
+}
+
+// refsHead reads HEAD's commit from a repository's info/refs URL.
+func (s *syncer) refsHead(ctx context.Context, client *http.Client, refsURL string) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, refsURL, nil)
 	if err != nil {
 		return "", err
 	}
-	resp, err := s.github.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return "", err
 	}

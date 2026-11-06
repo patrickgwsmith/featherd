@@ -30,11 +30,24 @@ type vendor struct {
 	Assigner string // cveMetadata.assignerShortName
 	Title    string
 	OSV      bool // link the OSV Android entries that alias a CVE
+	// HighOnly shows just the HIGH and CRITICAL ones. The index still
+	// holds every record, so one scored later, by an update, joins.
+	HighOnly bool
 }
 
+// The order is the nav's; the last vendor's feed is written last, which
+// ensureView takes as the whole of the vendor views.
+//
+// The Linux kernel CNA assigns about 25 CVEs a day and scores only about
+// 40% of them, all HIGH or CRITICAL, so its page shows just those; the
+// unscored rest would fill 100 entries in four days. Microsoft scores
+// every CVE and publishes in monthly batches, three quarters of them
+// HIGH or CRITICAL, so its page shows them all.
 var vendors = []vendor{
 	{Name: "apple", Assigner: "apple", Title: "Apple"},
 	{Name: "android", Assigner: "google_android", Title: "Android", OSV: true},
+	{Name: "linux", Assigner: "Linux", Title: "Linux kernel", HighOnly: true},
+	{Name: "microsoft", Assigner: "microsoft", Title: "Microsoft"},
 }
 
 func vendorFor(assigner string) *vendor {
@@ -50,8 +63,10 @@ func (v vendor) indexKey() string { return "mut/vendor/" + v.Name }
 func (v vendor) pageKey() string  { return "view/" + v.Name + ".html" }
 func (v vendor) feedKey() string  { return "view/" + v.Name + ".xml" }
 
-// vendorIndexMax bounds each index. Apple has assigned about 9,000 CVEs and
-// Android about 5,000; the views need only the newest -view of them.
+// vendorIndexMax bounds each index. Apple has assigned about 9,000 CVEs,
+// Android about 5,000, and the Linux kernel and Microsoft many more; the
+// views need only the newest -view of them, or for a HighOnly view, enough
+// to find that many HIGH and CRITICAL (about five weeks of Linux's).
 const vendorIndexMax = 1000
 
 type indexEntry struct {
@@ -419,17 +434,11 @@ func (s *syncer) mirrorRef(ctx context.Context, key, fetchURL string) (title str
 	title = pageTitle(body)
 	// featherd's ETag is the body's sha256, so an unchanged page isn't
 	// written again.
-	head, err := s.s3.head(ctx, key)
+	stored, err = s.putIfChanged(ctx, key, "text/html; charset=utf-8", body)
 	if err != nil {
 		return "", false, err
 	}
-	if head.status == http.StatusOK && head.etag == `"`+sha256Hex(body)+`"` {
-		return title, false, nil
-	}
-	if _, err := s.s3.put(ctx, key, "text/html; charset=utf-8", body, "", ""); err != nil {
-		return "", false, err
-	}
-	return title, true, nil
+	return title, stored, nil
 }
 
 var titleRE = regexp.MustCompile(`(?is)<title[^>]*>(.*?)</title>`)
@@ -476,31 +485,45 @@ func (s *syncer) writeVendorViews(ctx context.Context, commit string, changed ma
 			return err
 		}
 		idx := decodeIndex(resp.body)
-		idx = idx[:min(len(idx), s.viewSize)]
-		cves := make([]viewCVE, len(idx))
-		infos := make([]recordInfo, len(idx))
-		pos := map[string]int{}
-		paths := make([]string, len(idx))
-		for i, e := range idx {
-			pos[e.Path], paths[i] = i, e.Path
+		// The records are read back in batches until the view is full: one
+		// batch of -view for most, smaller ones for a HighOnly view, which
+		// reads further down the index.
+		batch := s.viewSize
+		if v.HighOnly {
+			batch = viewBatch
 		}
-		err = s.readBack(ctx, paths, func(path string, data []byte) {
-			i := pos[path]
-			c, err := newViewCVE(recentChange{CVEID: idx[i].ID, Path: path}, data)
-			if err != nil {
-				return
+		var cves []viewCVE
+		var infos []recordInfo
+		for start := 0; start < len(idx) && len(cves) < s.viewSize; start += batch {
+			part := idx[start:min(len(idx), start+batch)]
+			got := make([]viewCVE, len(part))
+			gotInfo := make([]recordInfo, len(part))
+			pos := map[string]int{}
+			paths := make([]string, len(part))
+			for i, e := range part {
+				pos[e.Path], paths[i] = i, e.Path
 			}
-			info, _ := parseRecordInfo(data)
-			cves[i], infos[i] = c, info
-		})
-		if err != nil {
-			return err
+			err = s.readBack(ctx, paths, func(path string, data []byte) {
+				i := pos[path]
+				c, err := newViewCVE(recentChange{CVEID: part[i].ID, Path: path}, data)
+				if err != nil {
+					return
+				}
+				info, _ := parseRecordInfo(data)
+				got[i], gotInfo[i] = c, info
+			})
+			if err != nil {
+				return err
+			}
+			for i, c := range got {
+				if c.ID == "" || (v.HighOnly && !c.High()) || len(cves) >= s.viewSize {
+					continue
+				}
+				cves, infos = append(cves, c), append(infos, gotInfo[i])
+			}
 		}
 		vv := vendorView{v: v}
 		for i, c := range cves {
-			if c.ID == "" {
-				continue
-			}
 			// A CVE's first published version is "new"; the views of
 			// deltaLog tell new from updated, the index doesn't.
 			c.New = !c.Published.IsZero() && c.Updated.Sub(c.Published) < time.Minute
@@ -572,9 +595,14 @@ func (s *syncer) writeVendorViews(ctx context.Context, commit string, changed ma
 				}
 			}
 		}
+		title, about := vv.v.Title+" CVEs", "assigned by "+vv.v.Title+" and new or updated"
+		if vv.v.HighOnly {
+			title = vv.v.Title + " HIGH and CRITICAL CVEs"
+			about = "assigned by " + vv.v.Title + ", rated HIGH or CRITICAL, and new or updated"
+		}
 		page := viewPage{
 			Commit: commit, Generated: generated, CVEs: vv.cves,
-			Title: vv.v.Title + " CVEs", About: "assigned by " + vv.v.Title + " and new or updated",
+			Title: title, About: about,
 			FeedID: "https://github.com/CVEProject/cvelistV5#" + vv.v.Name,
 			Page:   vv.v.Name + ".html", Feed: vv.v.Name + ".xml",
 		}

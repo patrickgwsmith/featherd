@@ -25,9 +25,10 @@ cve-sync                    github.com / raw.githubusercontent.com      featherd
   │ GET C1/cves/deltaLog.json again ──▶│ until both views are full          │
   │   GET each CVE listed, newest first ──────────────────────────────────▶│ (read back for titles, severity)
   │ PUT view/index.html, feed.xml, high.html, high.xml ───────────────────▶│
-  │ PUT mut/vendor/apple, mut/vendor/android  (records those CNAs assigned) ▶│
+  │ PUT mut/vendor/{apple,android,linux,microsoft} (records those CNAs assigned) ▶│
   │ GET support.apple.com, source.android.com pages cited ──▶ PUT refs/… ──▶│
-  │ PUT view/apple.html, apple.xml, android.html, android.xml ────────────▶│
+  │ PUT view/{apple,android,linux,microsoft}.html and .xml ───────────────▶│
+  │ PUT view/kev.html, kev.xml (the newest KEV copy, records read back) ──▶│
   │ PUT mut/sync commit=C1 fetch_time=T1   If-Match: E ───────────────────▶│ ← commit point
 ```
 
@@ -42,11 +43,17 @@ cve bucket  →  data/cve.sqlite3
 ├── view/high.xml                                the same, as an Atom feed
 ├── view/apple.html, view/apple.xml              the newest CVEs Apple assigned, with their notes
 ├── view/android.html, view/android.xml          the same for Android, with bulletins and OSV
+├── view/linux.html, view/linux.xml              the Linux kernel's, HIGH and CRITICAL only
+├── view/microsoft.html, view/microsoft.xml      Microsoft's
+├── view/kev.html, view/kev.xml                  the CVEs added to CISA KEV most recently
 ├── refs/support.apple.com/en-us/122716.html     an Apple security note, raw HTML as served
 ├── refs/source.android.com/docs/security/bulletin/2026/2026-06-01.html
 ├── refs/osv/Android/ASB-A-351830787.json        an OSV Android entry, as served
-├── mut/vendor/apple, mut/vendor/android         each vendor's records, newest first
+├── refs/www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json
+├── refs/github.com/cisagov/kev-data/known_exploited_vulnerabilities.json
+├── mut/vendor/apple, …/linux, …/microsoft       each vendor's records, newest first
 ├── mut/osv/Android                              OSV's newest modified, ETag, and aliases
+├── mut/kev                                      each KEV source's ETag or commit, and release
 └── mut/sync                                     the commit and newest delta synced
 ```
 
@@ -125,6 +132,16 @@ content of iOS 27.2 and iPadOS 27.2", "Android Security Bulletin—November
 2026"), which ties it to the OS release that fixed it. Android CVEs also
 link the OSV entries that alias them.
 
+`view/linux.html` and `view/microsoft.html` do the same for the Linux
+kernel's CNA (`Linux`) and Microsoft's (`microsoft`), without mirrored
+pages. The Linux kernel view shows only HIGH and CRITICAL CVEs: the CNA
+assigns about 25 a day and leaves about 60% unscored (the rest are all
+HIGH or CRITICAL), so a view of every one would cover about four days of
+mostly unrated fixes. Its index still holds every record, so one scored by
+a later update joins the view, which reads down the index in batches until
+it's full. Microsoft scores every CVE and publishes in monthly batches,
+about three quarters of them HIGH or CRITICAL, so its view shows them all.
+
 - **An index per vendor.** `deltaLog.json` doesn't say who assigned a CVE,
   so `mut/vendor/<name>` lists each vendor's records, newest
   `dateUpdated` first, up to 1,000. It's updated as records are stored,
@@ -152,6 +169,40 @@ link the OSV entries that alias them.
   sync logs it, reports it in its summary line, and still commits. A page
   that's still missing is fetched by the next sync that shows it. OSV's
   state doesn't move, so the next run fetches those entries again.
+
+## Known exploited (CISA KEV)
+
+`view/kev.html` and `view/kev.xml` list the `-view` CVEs added most recently
+to CISA's [Known Exploited Vulnerabilities
+catalog](https://www.cisa.gov/known-exploited-vulnerabilities-catalog),
+with the date added, CISA's due date, the required action, a ransomware tag
+for known ransomware use, and the vendor links from the entry's notes.
+Severity, assigner and the record's JSON come from the record in the bucket.
+
+- **Fetched from both places it's published.** Every run, whether or not
+  cvelistV5 moved:
+  - `cisa.gov`'s JSON is revalidated with its ETag, so it's a 304 when
+    unchanged.
+  - [cisagov/kev-data](https://github.com/cisagov/kev-data) is read like
+    cvelistV5: HEAD's commit from `info/refs`, and the file at that commit
+    from raw.githubusercontent.com only when HEAD moved.
+- **Each copy is mirrored raw** at its host and path under `refs/`, and
+  stored only when its sha256 differs from featherd's ETag. A copy that
+  doesn't parse as a catalog isn't stored.
+- **The newest release wins.** `mut/kev` records each source's
+  `dateReleased`, and the view is built from whichever is later (cisa.gov
+  on a tie). So if either source is down or behind, the other carries the
+  view. The same release arriving from the second source doesn't rewrite
+  it.
+- **When it's written.** On every sync where cvelistV5 moved (records may
+  have gained a score), and on an up-to-date run when the newest release
+  changed or `view/kev.xml` is missing.
+- **Failures don't hold up the CVEs.** A source failing is logged and
+  reported in the summary line (`KEV not fetched from …`); its state
+  doesn't move, so the next run tries it again.
+- **Its own Atom IDs.** Entries are `<cve.org URL>#kev`, dated by when the
+  CVE was added to the catalog, so a reader subscribed to several feeds
+  doesn't merge them with the record's entries.
 
 ## Limits
 
@@ -257,9 +308,11 @@ ssh featherd.exe.xyz bash -s -- cve < examples/deploy.sh
 Each run checks for `mut/sync`. If it's missing, the run first does
 `make seed` and then deletes the zip, so the server needs about 650 MB free
 once. Every run then does `cve-sync -once`. The views are published at `:8000/cve/` (and
-`:8000/cve/feed.xml`), `:8000/cve/high.html`, `:8000/cve/apple.html` and
-`:8000/cve/android.html` (each with its `.xml` feed), and `mut/sync` at
-`:8000/cve/sync.txt`. The mirrored pages under `refs/` stay in the bucket;
+`:8000/cve/feed.xml`), `:8000/cve/high.html`, `:8000/cve/apple.html`,
+`:8000/cve/android.html`, `:8000/cve/linux.html`,
+`:8000/cve/microsoft.html` and `:8000/cve/kev.html` (each with its `.xml`
+feed), and `mut/sync` at
+`:8000/cve/sync.txt`. The mirrored pages and KEV copies under `refs/` stay in the bucket;
 they're not published. Because the seed happens inside the first run, the
 deploy's first run takes a few minutes.
 
@@ -281,5 +334,8 @@ deploy's first run takes a few minutes.
   mirrored and linked, refetching only the pages cited by changed records,
   OSV revalidation and incremental fetches, a vendor site failing without
   failing the sync, a seed building the indexes, and which URLs map to
-  which keys.
+  which keys. For KEV, it covers both copies mirrored, the view following
+  whichever source released last, a 304 and an unmoved HEAD fetching
+  nothing more, one source down without failing the sync, and a broken
+  copy not being stored.
 - `s3.go` is rss-reader's client without LIST, plus HEAD.

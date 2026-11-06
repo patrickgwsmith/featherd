@@ -52,7 +52,12 @@ CRITICAL to view/high.html and view/high.xml. view/apple.html and
 view/android.html, with feeds, list the newest CVEs those CNAs assigned,
 linked to the Apple security notes and Android bulletins they cite, which
 are mirrored as raw HTML under refs/. OSV's Android entries are mirrored
-to refs/osv/Android/.
+to refs/osv/Android/. view/linux.html lists the Linux kernel's newest HIGH
+and CRITICAL CVEs, and view/microsoft.html Microsoft's newest.
+view/kev.html lists the CVEs added most recently to CISA's Known Exploited
+Vulnerabilities catalog, fetched from both cisa.gov and
+github.com/cisagov/kev-data, whichever released last, and each mirrored
+raw under refs/.
 
 Environment:
   FEATHERD               featherd's URL (default http://127.0.0.1:8333)

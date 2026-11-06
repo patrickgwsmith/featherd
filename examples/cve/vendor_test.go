@@ -228,3 +228,57 @@ func TestPageTitle(t *testing.T) {
 		}
 	}
 }
+
+// The Linux kernel view shows just its HIGH and CRITICAL CVEs, reading past
+// the first batch of the index to find them; Microsoft's shows them all.
+func TestHighOnlyVendorView(t *testing.T) {
+	env := newTestEnv(t)
+	env.s.viewSize = 2
+	const (
+		high   = `[{"cvssV3_1":{"version":"3.1","baseScore":7.8,"baseSeverity":"HIGH"}}]`
+		medium = `[{"cvssV3_1":{"version":"3.1","baseScore":5.5,"baseSeverity":"MEDIUM"}}]`
+	)
+	assigned := func(assigner, rec string) string {
+		return strings.Replace(rec, `"assignerShortName":"acme"`, fmt.Sprintf(`"assignerShortName":%q`, assigner), 1)
+	}
+	files := map[string]string{}
+	var cs []change
+	// Linux, newest first: unscored past the first batch, then two HIGHs
+	// and a third, older, that the view of 2 doesn't reach.
+	n := viewBatch + 3
+	for i := range n {
+		id := fmt.Sprintf("CVE-2026-%04d", 1000+i)
+		metrics := "[]"
+		if i >= viewBatch {
+			metrics = high
+		}
+		updated := fmt.Sprintf("2026-11-02T00:%02d:%02dZ", 59-i/60, 59-i%60)
+		p, _ := recordPath(change{CVEID: id})
+		files[p] = assigned("Linux", fullRecord(id, "PUBLISHED", "linux "+id, "d", metrics, updated))
+		cs = append(cs, ch(id))
+	}
+	ms1, ms2 := ch("CVE-2026-2001"), ch("CVE-2026-2002")
+	files["cves/2026/2xxx/CVE-2026-2001.json"] = assigned("microsoft", fullRecord("CVE-2026-2001", "PUBLISHED", "Windows info disclosure", "d", medium, "2026-11-02T00:50:00Z"))
+	files["cves/2026/2xxx/CVE-2026-2002.json"] = assigned("microsoft", fullRecord("CVE-2026-2002", "PUBLISHED", "Windows EoP", "d", high, "2026-11-02T00:40:00Z"))
+	files["cves/deltaLog.json"] = deltaLog(delta{FetchTime: "2026-11-02T01:00:00.000Z", New: append(cs, ms1, ms2)})
+	env.gh.commit(sha1, files)
+	env.sync(t)
+
+	if idx, _, _, _ := env.object(t, "mut/vendor/linux"); strings.Count(idx, "\n") != n {
+		t.Fatalf("linux index has %d entries, want every record", strings.Count(idx, "\n"))
+	}
+	want := fmt.Sprintf("CVE-2026-%04d CVE-2026-%04d", 1000+viewBatch, 1001+viewBatch)
+	if got := entryIDs(env.feedAt(t, "view/linux.xml")); strings.Join(got, " ") != want {
+		t.Fatalf("linux.xml: %v; want %s", got, want)
+	}
+	page, _, _, _ := env.object(t, "view/linux.html")
+	if !strings.Contains(page, "Linux kernel HIGH and CRITICAL CVEs") {
+		t.Error("linux.html doesn't say it's HIGH and CRITICAL only")
+	}
+	if got := entryIDs(env.feedAt(t, "view/microsoft.xml")); strings.Join(got, " ") != "CVE-2026-2001 CVE-2026-2002" {
+		t.Fatalf("microsoft.xml: %v", got)
+	}
+	if index, _, _, _ := env.object(t, indexKey); !strings.Contains(index, `href="linux.html"`) || !strings.Contains(index, `href="microsoft.html"`) {
+		t.Error("index.html doesn't link the new vendor pages")
+	}
+}

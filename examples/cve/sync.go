@@ -77,6 +77,8 @@ type syncResult struct {
 	RefsFetched, RefsStored, RefsFailed int // vendor pages: fetched, changed, failed
 	OSVStored                           int // OSV Android entries stored
 	OSVErr                              error
+	KEVStored                           int // copies of the KEV catalog stored
+	KEVErr                              error
 }
 
 func (r syncResult) String() string {
@@ -92,6 +94,12 @@ func (r syncResult) String() string {
 	}
 	if r.OSVErr != nil {
 		s += fmt.Sprintf("; OSV Android not updated: %v", r.OSVErr)
+	}
+	if r.KEVStored > 0 {
+		s += fmt.Sprintf("; %d KEV catalog copies stored", r.KEVStored)
+	}
+	if r.KEVErr != nil {
+		s += fmt.Sprintf("; KEV not fetched from %v", strings.ReplaceAll(r.KEVErr.Error(), "\n", ", "))
 	}
 	return s
 }
@@ -137,11 +145,16 @@ func (s *syncer) sync(ctx context.Context) (syncResult, error) {
 		}
 		res.OSVErr = err
 	}
+	// So is the KEV catalog, from both cisa.gov and GitHub.
+	kevChanged, err := s.syncKEV(ctx, &res)
+	if err != nil {
+		return res, err
+	}
 	if head == st.Commit {
 		res.UpToDate = true
 		// The views are normally written with each sync, but a seeded
 		// bucket, or an older cve-sync's, has none until HEAD moves.
-		return res, s.ensureView(ctx, head, osv, osvChanged, &res)
+		return res, s.ensureView(ctx, head, osv, osvChanged, kevChanged, &res)
 	}
 
 	deltas, complete, err := s.deltasSince(ctx, head, st.FetchTime)
@@ -189,6 +202,11 @@ func (s *syncer) sync(ctx context.Context) (syncResult, error) {
 		return res, err
 	}
 	if err := s.writeVendorViews(ctx, head, vc.refs, osv, &res); err != nil {
+		return res, err
+	}
+	// Rewritten with every sync, as the records it reads back may have
+	// gained a score.
+	if err := s.writeKEVView(ctx, head); err != nil {
 		return res, err
 	}
 

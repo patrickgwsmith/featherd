@@ -131,7 +131,7 @@ func (v *viewScan) flush(ctx context.Context) error {
 // ensureView writes the views at commit that are missing, on a run where
 // cvelistV5 hasn't moved: the vendor views also when their index was
 // just backfilled, or OSV changed.
-func (s *syncer) ensureView(ctx context.Context, commit string, osv map[string][]string, osvChanged bool, res *syncResult) error {
+func (s *syncer) ensureView(ctx context.Context, commit string, osv map[string][]string, osvChanged, kevChanged bool, res *syncResult) error {
 	resp, err := s.s3.head(ctx, highFeedKey)
 	if err != nil {
 		return err
@@ -151,7 +151,15 @@ func (s *syncer) ensureView(ctx context.Context, commit string, osv map[string][
 		return err
 	}
 	if backfilled || osvChanged || resp.status != http.StatusOK {
-		return s.writeVendorViews(ctx, commit, nil, osv, res)
+		if err := s.writeVendorViews(ctx, commit, nil, osv, res); err != nil {
+			return err
+		}
+	}
+	if resp, err = s.s3.head(ctx, kevFeedKey); err != nil {
+		return err
+	}
+	if kevChanged || resp.status != http.StatusOK {
+		return s.writeKEVView(ctx, commit)
 	}
 	return nil
 }
@@ -212,6 +220,9 @@ func (s *syncer) writeView(ctx context.Context, commit string) error {
 func (s *syncer) putView(ctx context.Context, page viewPage, pageKey, feedKey string) error {
 	sortByUpdated(page.CVEs)
 	page.Nav = viewNav
+	if page.Source == "" {
+		page.Source, page.SourceURL = "cvelistV5", "https://github.com/CVEProject/cvelistV5"
+	}
 	var html bytes.Buffer
 	if err := indexTemplate.Execute(&html, page); err != nil {
 		return err
@@ -229,7 +240,7 @@ func (s *syncer) putView(ctx context.Context, page viewPage, pageKey, feedKey st
 
 // viewNav links every view from each page.
 var viewNav = func() []navLink {
-	nav := []navLink{{"./", "All"}, {"high.html", "HIGH and CRITICAL"}}
+	nav := []navLink{{"./", "All"}, {"high.html", "HIGH and CRITICAL"}, {"kev.html", "Known exploited"}}
 	for _, v := range vendors {
 		nav = append(nav, navLink{v.Name + ".html", v.Title})
 	}
@@ -254,9 +265,11 @@ type viewPage struct {
 	CVEs      []viewCVE
 
 	Title, About string // About completes "The N newest CVE records …"
-	FeedID       string
-	Page, Feed   string // relative links to this page and its feed
-	Nav          []navLink
+	// Source is what the view lists from, cvelistV5 unless set.
+	Source, SourceURL string
+	FeedID            string
+	Page, Feed        string // relative links to this page and its feed
+	Nav               []navLink
 }
 
 // viewCVE is what the view shows of one record.
@@ -266,7 +279,8 @@ type viewCVE struct {
 	Level                                  string // "critical", "high", "medium", "low" or "none"
 	New, Rejected                          bool
 	Published, Updated                     time.Time
-	Refs                                   []viewRef // in the vendor views
+	Refs                                   []viewRef // in the vendor and kev views
+	KEV                                    *kevInfo  // in the kev view
 }
 
 func (v viewCVE) Link() string { return "https://www.cve.org/CVERecord?id=" + v.ID }
@@ -458,7 +472,7 @@ func (p viewPage) atom() ([]byte, error) {
 	f := feed{
 		ID:       p.FeedID,
 		Title:    p.Title,
-		Subtitle: fmt.Sprintf("The %d newest CVE records %s in cvelistV5, as of commit %s", len(p.CVEs), p.About, short(p.Commit)),
+		Subtitle: fmt.Sprintf("The %d newest CVE records %s in %s, as of cvelistV5 commit %s", len(p.CVEs), p.About, p.Source, short(p.Commit)),
 		Updated:  p.Generated.Format(time.RFC3339),
 		Author:   person{"CVE Program"},
 		// Relative, as the feed is published next to the page wherever
@@ -474,8 +488,13 @@ func (p viewPage) atom() ([]byte, error) {
 		f.Updated = p.CVEs[0].Updated.UTC().Format(time.RFC3339)
 	}
 	for _, v := range p.CVEs {
+		id := v.Link()
+		if v.KEV != nil {
+			// Its own entry, apart from the record's in the other feeds.
+			id += "#kev"
+		}
 		e := entry{
-			ID:    v.Link(),
+			ID:    id,
 			Title: text{Body: v.ID + ": " + v.Title},
 			Links: []link{
 				{Rel: "alternate", Type: "text/html", Href: v.Link()},
@@ -499,13 +518,30 @@ func (p viewPage) atom() ([]byte, error) {
 		if v.Assigner != "" {
 			e.Author = &person{v.Assigner}
 		}
-		e.Categories = append(e.Categories, category{map[bool]string{true: "new", false: "updated"}[v.New]})
+		if v.KEV != nil {
+			e.Categories = append(e.Categories, category{"known-exploited"})
+			if v.KEV.Ransomware {
+				e.Categories = append(e.Categories, category{"ransomware"})
+			}
+		} else {
+			e.Categories = append(e.Categories, category{map[bool]string{true: "new", false: "updated"}[v.New]})
+		}
 		if v.Rejected {
 			e.Categories = append(e.Categories, category{"rejected"})
 		}
 		summary := v.Description
 		if v.Severity != "" {
 			summary = v.Severity + "\n\n" + summary
+		}
+		if k := v.KEV; k != nil {
+			summary += "\n\n" + k.Product + ". Added to CISA KEV " + k.Added.Format(time.DateOnly)
+			if !k.Due.IsZero() {
+				summary += ", due " + k.Due.Format(time.DateOnly)
+			}
+			summary += "."
+			if k.Action != "" {
+				summary += " " + k.Action
+			}
 		}
 		if summary = strings.TrimSpace(summary); summary != "" {
 			e.Summary = &text{Type: "text", Body: truncate(summary, 2000)}
@@ -528,7 +564,13 @@ var indexTemplate = template.Must(template.New("index").Funcs(template.FuncMap{
 		}
 		return t.UTC().Format("2 Jan 2006, 15:04 UTC")
 	},
-	"iso":     func(t time.Time) string { return t.UTC().Format(time.RFC3339) },
+	"iso": func(t time.Time) string { return t.UTC().Format(time.RFC3339) },
+	"day": func(t time.Time) string {
+		if t.IsZero() {
+			return ""
+		}
+		return t.UTC().Format("2 Jan 2006")
+	},
 	"snippet": func(s string) string { return truncate(s, 400) },
 	"short":   short,
 }).Parse(`<!doctype html>
@@ -546,6 +588,8 @@ a { color: #0645ad; text-decoration: none; }
 .meta { color: #666; font-size: 0.85rem; }
 .tag { display: inline-block; font-size: 0.75rem; padding: 0 0.4em; border-radius: 0.25rem; background: #eee; color: #444; }
 .new { background: #dbeafe; color: #1e40af; }
+.kev, .ransomware { background: #ede9fe; color: #5b21b6; }
+.ransomware { background: #1f2937; color: #fff; }
 .rejected { background: #e5e7eb; color: #6b7280; text-decoration: line-through; }
 .critical { background: #7f1d1d; color: #fff; }
 .high { background: #fee2e2; color: #991b1b; }
@@ -559,14 +603,15 @@ footer { color: #888; font-size: 0.8rem; margin-top: 1rem; }
 </style>
 <h1>{{.Title}}</h1>
 <nav>{{range $i, $n := .Nav}}{{if $i}} · {{end}}{{if eq $n.Href $.Page}}<strong>{{$n.Title}}</strong>{{else}}<a href="{{$n.Href}}">{{$n.Title}}</a>{{end}}{{end}}</nav>
-<p>The {{len .CVEs}} newest CVE records {{.About}} in <a href="https://github.com/CVEProject/cvelistV5">cvelistV5</a>. Also as an <a href="{{.Feed}}">Atom feed</a>.</p>
+<p>The {{len .CVEs}} newest CVE records {{.About}} in <a href="{{.SourceURL}}">{{.Source}}</a>. Also as an <a href="{{.Feed}}">Atom feed</a>.</p>
 {{range .CVEs}}<article>
 <h2><a class="id" href="{{.Link}}">{{.ID}}</a> {{.Title}}</h2>
-<div class="meta">{{if .New}}<span class="tag new">new</span>{{else}}<span class="tag">updated</span>{{end}}
+<div class="meta">{{if .KEV}}<span class="tag kev">known exploited</span>{{if .KEV.Ransomware}} <span class="tag ransomware">ransomware</span>{{end}}{{else if .New}}<span class="tag new">new</span>{{else}}<span class="tag">updated</span>{{end}}
 {{- if .Rejected}} <span class="tag rejected">rejected</span>{{end}}
 {{- if .Severity}} <span class="tag {{.Level}}">{{.Severity}}</span>{{end}}
 {{- with .Assigner}} · {{.}}{{end}}
-{{- if not .Updated.IsZero}} · <time datetime="{{iso .Updated}}">{{date .Updated}}</time>{{end}}</div>
+{{- if .KEV}}{{with .KEV.Product}} · {{.}}{{end}} · added <time datetime="{{iso .KEV.Added}}">{{day .KEV.Added}}</time>{{if not .KEV.Due.IsZero}}, due {{day .KEV.Due}}{{end}}
+{{- else if not .Updated.IsZero}} · <time datetime="{{iso .Updated}}">{{date .Updated}}</time>{{end}}</div>
 {{with .Description}}<p>{{snippet .}}</p>{{end}}
 {{with .Refs}}<p class="refs">{{range $i, $r := .}}{{if $i}} · {{end}}<a href="{{$r.URL}}">{{$r.Title}}</a>{{end}}</p>{{end}}
 </article>
