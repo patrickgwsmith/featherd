@@ -58,12 +58,12 @@ type viewPage struct {
 }
 
 type viewPost struct {
-	Title, Link, Source, Snippet string
-	Date                         time.Time
+	Title, Link, Related, Source, Snippet string
+	Date                                  time.Time
 }
 
 func newViewPost(e entry) viewPost {
-	p := viewPost{Title: e.Title, Link: e.Link.Href, Source: e.Source.Title}
+	p := viewPost{Title: e.Title, Link: e.link("alternate"), Related: e.link("related"), Source: e.Source.Title}
 	if p.Title == "" {
 		p.Title = "(untitled)"
 	}
@@ -116,7 +116,7 @@ footer { color: #888; font-size: 0.8rem; margin-top: 1rem; }
 <h1>Latest posts</h1>
 {{range .Posts}}<article>
 <h2>{{if .Link}}<a href="{{.Link}}">{{.Title}}</a>{{else}}{{.Title}}{{end}}</h2>
-<div class="meta">{{.Source}}{{if not .Date.IsZero}} · <time datetime="{{iso .Date}}">{{date .Date}}</time>{{end}}</div>
+<div class="meta">{{.Source}}{{if not .Date.IsZero}} · <time datetime="{{iso .Date}}">{{date .Date}}</time>{{end}}{{with .Related}} · <a href="{{.}}">permalink</a>{{end}}</div>
 {{with .Snippet}}<p>{{.}}</p>{{end}}
 </article>
 {{else}}<p>No posts yet.</p>

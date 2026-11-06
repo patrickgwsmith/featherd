@@ -126,7 +126,8 @@ func post(guid, title, date string) string {
 const atomFeed = `<?xml version="1.0" encoding="utf-8"?>
 <feed xmlns="http://www.w3.org/2005/Atom">
 <title>Daring Fireball</title>
-<entry><title>Linked: Something</title><link rel="alternate" href="/linked/2026/10/25/something"/>
+<entry><title>Linked: Something</title><link rel="alternate" href="https://example.com/something"/>
+<link rel="related" href="/linked/2026/10/25/something"/>
 <id>tag:daringfireball.net,2026:/linked//6.1</id><published>2026-10-25T20:00:00Z</published>
 <updated>2026-10-25T20:00:00Z</updated><content type="html">&lt;p&gt;A link.&lt;/p&gt;</content></entry>
 <entry><title type="html">&lt;script&gt;alert(1)&lt;/script&gt; Escaped</title><link href="javascript:alert(1)"/>
@@ -262,8 +263,14 @@ func TestRefresh(t *testing.T) {
 	if strings.Contains(page, "<script>") || strings.Contains(page, "javascript:") {
 		t.Fatalf("view isn't escaped:\n%s", page)
 	}
-	if !strings.Contains(page, env.base+"/linked/2026/10/25/something") {
-		t.Fatalf("relative Atom link not resolved:\n%s", page)
+	if !strings.Contains(page, `<a href="https://example.com/something">Linked: Something</a>`) {
+		t.Fatalf("title doesn't link to the alternate link:\n%s", page)
+	}
+	if !strings.Contains(page, `<a href="`+env.base+`/linked/2026/10/25/something">permalink</a>`) {
+		t.Fatalf("related link not resolved and shown as permalink:\n%s", page)
+	}
+	if strings.Count(page, ">permalink<") != 1 {
+		t.Fatalf("permalink shown on a post without a related link:\n%s", page)
 	}
 
 	// Refresh: MacRumors adds two posts and re-dates an old one, Daring

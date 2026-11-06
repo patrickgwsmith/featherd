@@ -19,7 +19,7 @@ type entry struct {
 	XMLName   xml.Name    `xml:"http://www.w3.org/2005/Atom entry"`
 	ID        string      `xml:"id"`
 	Title     string      `xml:"title"`
-	Link      atomLink    `xml:"link"`
+	Links     []atomLink  `xml:"link"`
 	Published string      `xml:"published,omitempty"`
 	Updated   string      `xml:"updated"`
 	Summary   *atomText   `xml:"summary"`
@@ -135,7 +135,7 @@ func parseFeed(data []byte, feedURL string, now time.Time) (title string, entrie
 			e := entry{
 				ID:     firstNonEmpty(strings.TrimSpace(it.GUID), link),
 				Title:  strings.TrimSpace(it.Title),
-				Link:   atomLink{Href: link, Rel: "alternate"},
+				Links:  entryLinks(link, ""),
 				Source: src,
 			}
 			if s := strings.TrimSpace(it.Description); s != "" {
@@ -151,17 +151,21 @@ func parseFeed(data []byte, feedURL string, now time.Time) (title string, entrie
 		title = f.Title.text()
 		src := source(title)
 		for _, ae := range f.Entries {
-			link := ""
+			// Daring Fireball's linked-list entries point alternate at the
+			// article being linked to and related at the post itself.
+			link, related := "", ""
 			for _, l := range ae.Links {
-				if l.Rel == "" || l.Rel == "alternate" {
+				switch {
+				case (l.Rel == "" || l.Rel == "alternate") && link == "":
 					link = resolve(base, l.Href)
-					break
+				case l.Rel == "related" && related == "":
+					related = resolve(base, l.Href)
 				}
 			}
 			e := entry{
 				ID:      firstNonEmpty(strings.TrimSpace(ae.ID), link),
 				Title:   ae.Title.text(),
-				Link:    atomLink{Href: link, Rel: "alternate"},
+				Links:   entryLinks(link, related),
 				Summary: ae.Summary.asHTML(),
 				Content: ae.Content.asHTML(),
 				Source:  src,
@@ -185,6 +189,26 @@ func parseFeed(data []byte, feedURL string, now time.Time) (title string, entrie
 		return "", nil, errors.New("parsing feed: no entry has an ID or a link")
 	}
 	return strings.TrimSpace(title), kept, nil
+}
+
+// entryLinks returns the stored links: alternate, then related if the feed
+// gave one that differs.
+func entryLinks(alternate, related string) []atomLink {
+	links := []atomLink{{Href: alternate, Rel: "alternate"}}
+	if related != "" && related != alternate {
+		links = append(links, atomLink{Href: related, Rel: "related"})
+	}
+	return links
+}
+
+// link returns the href of the entry's first link with rel, or "".
+func (e entry) link(rel string) string {
+	for _, l := range e.Links {
+		if l.Rel == rel || (rel == "alternate" && l.Rel == "") {
+			return l.Href
+		}
+	}
+	return ""
 }
 
 // setDates fills Published and Updated, which Atom requires, and sortTime:
