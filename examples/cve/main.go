@@ -37,23 +37,26 @@ func run(args []string, getenv func(string) string) error {
 	interval := fs.Duration("interval", 15*time.Minute, "time between syncs")
 	parallel := fs.Int("parallel", 8, "records fetched at once")
 	seedZip := fs.String("seed", "", "store every record in a midnight zip `file`, then exit")
-	viewSize := fs.Int("view", 100, "CVEs in each view")
+	viewSize := fs.Int("view", 500, "CVEs in each view")
 	fs.Usage = func() {
-		fmt.Fprintf(fs.Output(), `usage: cve-sync [-once] [-interval 15m] [-parallel 8] [-view 100]
+		fmt.Fprintf(fs.Output(), `usage: cve-sync [-once] [-interval 15m] [-parallel 8] [-view 500]
        cve-sync -seed FILE [-parallel 8]
 
 -seed stores every record in one of cvelistV5's daily
 *_all_CVEs_at_midnight.zip release assets, then sets mut/sync so the next
 sync applies only the deltas since. It refuses if mut/sync exists.
 
-Each sync also writes the newest new or updated CVEs to view/index.html
+Each sync also writes the newest new or updated CVEs to view/all.html
 and, as an Atom feed, view/feed.xml, and the newest of those rated HIGH or
-CRITICAL to view/high.html and view/high.xml. view/apple.html and
+CRITICAL to view/index.html, the home page, and view/high.xml (and to
+view/high.html, the page's old address). view/apple.html and
 view/android.html, with feeds, list the newest CVEs those CNAs assigned,
 linked to the Apple security notes and Android bulletins they cite, which
 are mirrored as raw HTML under refs/. OSV's Android entries are mirrored
 to refs/osv/Android/. view/linux.html lists the Linux kernel's newest HIGH
-and CRITICAL CVEs, and view/microsoft.html Microsoft's newest.
+and CRITICAL CVEs, view/microsoft.html Microsoft's newest, and
+view/chrome.html Chrome's, view/go.html Go's, view/apache.html the
+Apache Software Foundation's and view/openssl.html OpenSSL's.
 view/kev.html lists the CVEs added most recently to CISA's Known Exploited
 Vulnerabilities catalog, fetched from both cisa.gov and
 github.com/cisagov/kev-data, whichever released last, and each mirrored
@@ -149,6 +152,6 @@ func newSyncer(getenv func(string) string, parallel int) (*syncer, error) {
 		now:      time.Now,
 		log:      log.New(os.Stderr, "cve-sync: ", log.LstdFlags),
 		parallel: parallel,
-		viewSize: 100,
+		viewSize: 500,
 	}, nil
 }

@@ -24,10 +24,10 @@ cve-sync                    github.com / raw.githubusercontent.com      featherd
   │   PUT cves/2026/120xxx/CVE-2026-120339.json ──────────────────────────▶│
   │ GET C1/cves/deltaLog.json again ──▶│ until both views are full          │
   │   GET each CVE listed, newest first ──────────────────────────────────▶│ (read back for titles, severity)
-  │ PUT view/index.html, feed.xml, high.html, high.xml ───────────────────▶│
-  │ PUT mut/vendor/{apple,android,linux,microsoft} (records those CNAs assigned) ▶│
+  │ PUT view/all.html, feed.xml, index.html, high.html, high.xml ─────────▶│
+  │ PUT mut/vendor/{apple,android,linux,microsoft,chrome,go,apache,openssl} (those CNAs' records) ▶│
   │ GET support.apple.com, source.android.com pages cited ──▶ PUT refs/… ──▶│
-  │ PUT view/{apple,android,linux,microsoft}.html and .xml ───────────────▶│
+  │ PUT view/{apple,android,linux,microsoft,chrome,go,apache,openssl}.html and .xml ─────▶│
   │ PUT view/kev.html, kev.xml (the newest KEV copy, records read back) ──▶│
   │ PUT mut/sync commit=C1 fetch_time=T1   If-Match: E ───────────────────▶│ ← commit point
 ```
@@ -37,21 +37,26 @@ cve-sync                    github.com / raw.githubusercontent.com      featherd
 ```
 cve bucket  →  data/cve.sqlite3
 ├── cves/{year}/{n/1000}xxx/CVE-{year}-{n}.json   one record, as in the repository
-├── view/index.html                              the newest new or updated CVEs
+├── view/all.html                                the newest new or updated CVEs
 ├── view/feed.xml                                the same, as an Atom feed
-├── view/high.html                               the newest of those rated HIGH or CRITICAL
+├── view/index.html                              the home page: the newest of those rated HIGH or CRITICAL
+├── view/high.html                               the same page, at its old address
 ├── view/high.xml                                the same, as an Atom feed
 ├── view/apple.html, view/apple.xml              the newest CVEs Apple assigned, with their notes
 ├── view/android.html, view/android.xml          the same for Android, with bulletins and OSV
 ├── view/linux.html, view/linux.xml              the Linux kernel's, HIGH and CRITICAL only
 ├── view/microsoft.html, view/microsoft.xml      Microsoft's
+├── view/chrome.html, view/chrome.xml            Chrome's
+├── view/go.html, view/go.xml                    Go's
+├── view/apache.html, view/apache.xml            the Apache Software Foundation's
+├── view/openssl.html, view/openssl.xml          OpenSSL's
 ├── view/kev.html, view/kev.xml                  the CVEs added to CISA KEV most recently
 ├── refs/support.apple.com/en-us/122716.html     an Apple security note, raw HTML as served
 ├── refs/source.android.com/docs/security/bulletin/2026/2026-06-01.html
 ├── refs/osv/Android/ASB-A-351830787.json        an OSV Android entry, as served
 ├── refs/www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json
 ├── refs/github.com/cisagov/kev-data/known_exploited_vulnerabilities.json
-├── mut/vendor/apple, …/linux, …/microsoft       each vendor's records, newest first
+├── mut/vendor/apple, …/apache, …/openssl   each vendor's records, newest first
 ├── mut/osv/Android                              OSV's newest modified, ETag, and aliases
 ├── mut/kev                                      each KEV source's ETag or commit, and release
 └── mut/sync                                     the commit and newest delta synced
@@ -81,12 +86,16 @@ synced_at=2026-11-02T04:18:49Z
 ## The views
 
 Each sync also writes two views, each a page and an Atom feed of `-view`
-(default 100) CVEs:
+(default 500, enough to search a page with the browser's Find) CVEs:
 
-- `view/index.html` and `view/feed.xml`: the newest CVEs that
+The static HTML pages share a sidebar of list links beside the CVE records.
+On narrow screens, the links wrap above the records.
+
+- `view/all.html` and `view/feed.xml`: the newest CVEs that
   `deltaLog.json` lists as new or updated.
-- `view/high.html` and `view/high.xml`: the newest of those rated HIGH or
-  CRITICAL, and not rejected.
+- `view/index.html` and `view/high.xml`: the newest of those rated HIGH or
+  CRITICAL, and not rejected. This is the home page. It's also written to
+  `view/high.html`, its old address, so links to that still work.
 
 They're a projection, rewritten with plain `PUT`s on every sync:
 
@@ -94,9 +103,9 @@ They're a projection, rewritten with plain `PUT`s on every sync:
   `deltaLog.json` is read again from the top, and each CVE listed is read
   back from the bucket in batches until both views are full. The first
   view needs only the newest few hourly entries. The high view reads on
-  further, since most CVEs aren't HIGH or CRITICAL, but stops a week
-  before the newest entry, so a bucket missing records doesn't read all
-  30 days every sync. Each CVE appears once, at its newest listing, as
+  further, since most CVEs aren't HIGH or CRITICAL, up to 30 days
+  before the newest entry, all of `deltaLog.json`. A bucket missing
+  records, one never seeded, may read all 30 days every sync. Each CVE appears once, at its newest listing, as
   *new* or *updated*.
 - **Updates count.** Many CVEs are only scored later, often by CISA's ADP,
   in an update. Because records are read back at the version just
@@ -117,8 +126,9 @@ They're a projection, rewritten with plain `PUT`s on every sync:
   record's JSON at the commit.
 - **Before the state.** The views are written before `mut/sync`, so a failed
   write is retried by the next run. An up-to-date run writes them only if
-  `view/high.xml` (written last) is missing, as in a bucket that was just
-  seeded.
+  `view/high.xml` (written last) or `view/all.html` is missing, as in a
+  bucket that was just seeded or is from before the home page showed only
+  HIGH and CRITICAL.
 - The page is rendered with `html/template` and the feed with
   `encoding/xml`, so a record's text can't inject markup.
 
@@ -142,9 +152,33 @@ a later update joins the view, which reads down the index in batches until
 it's full. Microsoft scores every CVE and publishes in monthly batches,
 about three quarters of them HIGH or CRITICAL, so its view shows them all.
 
+`view/chrome.html` does the same for Chrome's CNA (`Chrome`), also
+without mirrored pages and showing every CVE. It assigns a few hundred a
+year, so 500 reach back well over a year. Chrome's own severity is in
+each description ("Chromium security severity: High"); the CVSS level
+shown, when there is one, is usually CISA's ADP's.
+
+`view/go.html` does the same for Go's CNA (`Go`), which assigns CVEs in
+the standard library, `golang.org/x` modules and the toolchain (not
+third-party modules, which GitHub's CNA mostly covers). It assigns a few
+dozen a year, mostly without a CVSS score, so the view shows every one and
+500 reach back years.
+
+`view/apache.html` does the same for the Apache Software Foundation's CNA
+(`apache`), which covers all of its projects: httpd, Tomcat, Struts,
+Kafka, ActiveMQ and the rest, not just the web server. It assigns several
+hundred a year, often rated only in the description ("important",
+"moderate") rather than with a CVSS score, so the view shows every one.
+
+`view/openssl.html` does the same for OpenSSL's CNA (`openssl`), which
+covers the OpenSSL library and tools only (BoringSSL's rare CVEs come
+from Google's CNA). It assigns a dozen or so a year, each rated Low,
+Moderate or High in its advisory and often without a CVSS score, so the
+view shows every one and 500 reach back many years.
+
 - **An index per vendor.** `deltaLog.json` doesn't say who assigned a CVE,
   so `mut/vendor/<name>` lists each vendor's records, newest
-  `dateUpdated` first, up to 1,000. It's updated as records are stored,
+  `dateUpdated` first, up to 2,000. It's updated as records are stored,
   so the views aren't limited to `deltaLog.json`'s 30 days. A seed builds
   it from every record. A bucket without one, such as one synced before
   the vendor views, is backfilled once from the 30 days `deltaLog.json`
@@ -265,7 +299,7 @@ make sync
 # cve-sync: up to date at 8c0afd8e6690
 
 curl -s http://127.0.0.1:8333/cve/cves/2024/3xxx/CVE-2024-3094.json
-open http://127.0.0.1:8333/cve/view/index.html
+open http://127.0.0.1:8333/cve/view/index.html   # HIGH and CRITICAL; all.html for every CVE
 ```
 
 | target      | does                                                                  |
@@ -307,10 +341,11 @@ ssh featherd.exe.xyz bash -s -- cve < examples/deploy.sh
 
 Each run checks for `mut/sync`. If it's missing, the run first does
 `make seed` and then deletes the zip, so the server needs about 650 MB free
-once. Every run then does `cve-sync -once`. The views are published at `:8000/cve/` (and
-`:8000/cve/feed.xml`), `:8000/cve/high.html`, `:8000/cve/apple.html`,
+once. Every run then does `cve-sync -once`. The views are published at `:8000/cve/` (HIGH and
+CRITICAL, with `:8000/cve/high.xml`; also at `:8000/cve/high.html`),
+`:8000/cve/all.html` (with `:8000/cve/feed.xml`), `:8000/cve/apple.html`,
 `:8000/cve/android.html`, `:8000/cve/linux.html`,
-`:8000/cve/microsoft.html` and `:8000/cve/kev.html` (each with its `.xml`
+`:8000/cve/microsoft.html`, `:8000/cve/chrome.html`, `:8000/cve/go.html`, `:8000/cve/apache.html`, `:8000/cve/openssl.html` and `:8000/cve/kev.html` (each with its `.xml`
 feed), and `mut/sync` at
 `:8000/cve/sync.txt`. The mirrored pages and KEV copies under `refs/` stay in the bucket;
 they're not published. Because the seed happens inside the first run, the
@@ -326,7 +361,7 @@ deploy's first run takes a few minutes.
   refusing a synced bucket, and a bad record leaving no state. For the
   view, it covers the page and feed's contents, order and escaping, reading
   past the last sync to fill the view, and writing a missing view once on
-  an up-to-date run. For the high view, it covers picking HIGH and
+  an up-to-date run, including `all.html` for an older bucket. For the high view, it covers picking HIGH and
   CRITICAL (including unlabelled CVSS 2 scores), leaving out rejected
   ones, reading further back than the first view, the week's cutoff, an
   ADP score arriving in an update, and adding the view to an older bucket.

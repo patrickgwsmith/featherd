@@ -340,7 +340,7 @@ func (s *syncer) writeKEVView(ctx context.Context, commit string) error {
 		FeedID: "https://www.cisa.gov/known-exploited-vulnerabilities-catalog#cve-sync",
 		Page:   "kev.html", Feed: "kev.xml",
 	}
-	return s.putView(ctx, page, kevPageKey, kevFeedKey)
+	return s.putView(ctx, page, kevFeedKey, kevPageKey)
 }
 
 // kevRefs is the links in an entry's notes, which are separated by " ; "

@@ -91,16 +91,16 @@ func TestView(t *testing.T) {
 		t.Errorf("c: %+v", e0)
 	}
 
-	page, _, ct, _ := env.object(t, indexKey)
+	page, _, ct, _ := env.object(t, allPageKey)
 	if ct != "text/html; charset=utf-8" {
-		t.Errorf("index.html: %q", ct)
+		t.Errorf("all.html: %q", ct)
 	}
 	if strings.Contains(page, "<script>") || !strings.Contains(page, "&lt;script&gt;") {
-		t.Error("index.html doesn't escape a record's title")
+		t.Error("all.html doesn't escape a record's title")
 	}
 	for _, want := range []string{`href="feed.xml"`, "CVE-2026-0003", `class="tag critical">CRITICAL 9.3 (CVSS 4.0)`, "rejected", "Path traversal"} {
 		if !strings.Contains(page, want) {
-			t.Errorf("index.html lacks %q", want)
+			t.Errorf("all.html lacks %q", want)
 		}
 	}
 }
@@ -201,7 +201,7 @@ func TestHighView(t *testing.T) {
 			delta{FetchTime: "2026-11-02T02:00:00.000Z", Updated: []change{cs[2]}},
 			delta{FetchTime: "2026-11-02T01:00:00.000Z", New: []change{cs[3], cs[4]}},
 			// Over highWindow before the newest entry: not read.
-			delta{FetchTime: "2026-10-20T00:00:00.000Z", New: []change{cs[5]}},
+			delta{FetchTime: "2026-09-20T00:00:00.000Z", New: []change{cs[5]}},
 		),
 		"cves/2026/0xxx/CVE-2026-0001.json": fullRecord(ids[0], "PUBLISHED", "medium", "", `[{"cvssV3_1":{"baseScore":5.0,"baseSeverity":"MEDIUM"}}]`, "2026-11-02T03:00:00Z"),
 		"cves/2026/0xxx/CVE-2026-0002.json": fullRecord(ids[1], "PUBLISHED", "unscored", "", `[]`, "2026-11-02T02:59:00Z"),
@@ -209,7 +209,7 @@ func TestHighView(t *testing.T) {
 		// CVSS 2 has no baseSeverity: 7.5 is high.
 		"cves/2026/0xxx/CVE-2026-0004.json": fullRecord(ids[3], "PUBLISHED", "old high", "", `[{"cvssV2_0":{"baseScore":7.5}}]`, "2026-11-02T01:00:00Z"),
 		"cves/2026/0xxx/CVE-2026-0005.json": fullRecord(ids[4], "PUBLISHED", "critical", "", `[{"cvssV4_0":{"baseScore":9.3,"baseSeverity":"CRITICAL"}}]`, "2026-11-02T00:59:00Z"),
-		"cves/2026/0xxx/CVE-2026-0006.json": fullRecord(ids[5], "PUBLISHED", "too old", "", `[{"cvssV3_1":{"baseScore":9.8,"baseSeverity":"CRITICAL"}}]`, "2026-10-20T00:00:00Z"),
+		"cves/2026/0xxx/CVE-2026-0006.json": fullRecord(ids[5], "PUBLISHED", "too old", "", `[{"cvssV3_1":{"baseScore":9.8,"baseSeverity":"CRITICAL"}}]`, "2026-09-20T00:00:00Z"),
 	}
 	env.gh.commit(sha1, files)
 	env.sync(t)
@@ -227,20 +227,25 @@ func TestHighView(t *testing.T) {
 	if high.ID == env.feed(t).ID {
 		t.Error("high.xml has feed.xml's id")
 	}
-	page, _, ct, _ := env.object(t, highPageKey)
+	// The home page is the high view.
+	page, _, ct, _ := env.object(t, indexKey)
 	if ct != "text/html; charset=utf-8" {
-		t.Errorf("high.html: %q", ct)
+		t.Errorf("index.html: %q", ct)
 	}
-	for _, want := range []string{`href="high.xml"`, `href="./"`, "HIGH and CRITICAL", `class="tag high">7.5 (CVSS 2.0)`, `class="tag critical">CRITICAL 9.3`} {
+	for _, want := range []string{`href="high.xml"`, `href="all.html"`, `<div class="layout">`, `<nav aria-label="CVE lists">`, `<main>`, `<strong aria-current="page">HIGH and CRITICAL</strong>`, `class="tag high">7.5 (CVSS 2.0)`, `class="tag critical">CRITICAL 9.3`} {
 		if !strings.Contains(page, want) {
-			t.Errorf("high.html lacks %q", want)
+			t.Errorf("index.html lacks %q", want)
 		}
 	}
 	if strings.Contains(page, "CVE-2026-0001") || strings.Contains(page, "CVE-2026-0006") {
-		t.Error("high.html has a CVE it shouldn't")
+		t.Error("index.html has a CVE it shouldn't")
 	}
-	if index, _, _, _ := env.object(t, indexKey); !strings.Contains(index, `href="high.html"`) {
-		t.Error("index.html doesn't link high.html")
+	// high.html, its old address, is a copy of it.
+	if old, _, _, _ := env.object(t, highPageKey); old != page {
+		t.Error("high.html isn't a copy of index.html")
+	}
+	if all, _, _, _ := env.object(t, allPageKey); !strings.Contains(all, `href="./"`) || !strings.Contains(all, `<strong aria-current="page">All</strong>`) || !strings.Contains(all, "CVE-2026-0001") {
+		t.Error("all.html doesn't link the home page or list every CVE")
 	}
 
 	// CISA's ADP scores the unscored one HIGH in a later update: it's read
@@ -282,5 +287,55 @@ func TestEnsureHighView(t *testing.T) {
 	}
 	if got := env.feedAt(t, highFeedKey).Entries; len(got) != 0 {
 		t.Fatalf("high.xml: %+v", got)
+	}
+}
+
+// A bucket from before all.html, when index.html listed every CVE, gets it
+// and the new home page on an up-to-date run.
+func TestEnsureAllPage(t *testing.T) {
+	env := newTestEnv(t)
+	a := ch("CVE-2026-0001")
+	env.gh.commit(sha1, map[string]string{
+		"cves/deltaLog.json":                deltaLog(delta{FetchTime: "2026-11-02T01:00:00.000Z", New: []change{a}}),
+		"cves/2026/0xxx/CVE-2026-0001.json": record("CVE-2026-0001", "a"),
+	})
+	env.sync(t)
+	ctx := context.Background()
+	if _, err := env.s.s3.do(ctx, http.MethodDelete, allPageKey, nil, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := env.s.s3.put(ctx, indexKey, "text/html; charset=utf-8", []byte("old"), "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if res := env.sync(t); !res.UpToDate {
+		t.Fatalf("sync: %+v", res)
+	}
+	if all, _, _, status := env.object(t, allPageKey); status != http.StatusOK || !strings.Contains(all, "CVE-2026-0001") {
+		t.Fatalf("all.html: %d %q", status, all)
+	}
+	if index, _, _, _ := env.object(t, indexKey); index == "old" {
+		t.Fatal("index.html not rewritten")
+	}
+}
+
+func TestPageDetails(t *testing.T) {
+	long := strings.Repeat("word ", 300) + "last."
+	var b strings.Builder
+	p := viewPage{CVEs: []viewCVE{
+		{ID: "CVE-2026-0001", Title: "Overflow in thing", Description: long},
+		{ID: "CVE-2026-0002", Title: "Bypass in other", Severity: "CRITICAL 9.8 (CVSS 3.1)", Level: "critical", KEV: &kevInfo{Ransomware: true}},
+	}}
+	if err := indexTemplate.Execute(&b, p); err != nil {
+		t.Fatal(err)
+	}
+	page := b.String()
+	if !strings.Contains(page, `<details><summary><h2><a class="id" href="https://www.cve.org/CVERecord?id=CVE-2026-0001">CVE-2026-0001</a> Overflow in thing</h2></summary>`) {
+		t.Errorf("summary is not just the title:\n%s", page)
+	}
+	if !strings.Contains(page, `CVE-2026-0002</a> Bypass in other</h2> <span class="tag critical">CRITICAL 9.8 (CVSS 3.1)</span> <span class="tag kev">known exploited</span> <span class="tag ransomware">ransomware</span></summary>`) {
+		t.Errorf("severity and known exploited not in summary:\n%s", page)
+	}
+	if !strings.Contains(page, "<p>"+long+"</p>") || strings.Contains(page, "…") {
+		t.Error("description truncated or missing")
 	}
 }

@@ -62,7 +62,7 @@ func TestKEV(t *testing.T) {
 	page, _, _, _ := env.object(t, kevPageKey)
 	for _, want := range []string{
 		"Acme Widget &lt;b&gt;Bug&lt;/b&gt;", "Widget lets attackers in.", "CRITICAL 9.8", `<span class="tag ransomware">`,
-		"added <time", "2026.11.04", `href="https://acme.example/advisory/1"`, "nvd.nist.gov", "<strong>Known exploited</strong>",
+		"added <time", "2026.11.04", `href="https://acme.example/advisory/1"`, "nvd.nist.gov", `<strong aria-current="page">Known exploited</strong>`,
 	} {
 		if !strings.Contains(page, want) {
 			t.Errorf("kev.html lacks %q", want)

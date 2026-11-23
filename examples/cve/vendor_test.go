@@ -71,7 +71,7 @@ func TestVendorViews(t *testing.T) {
 		t.Fatalf("apple.xml: %v", got)
 	}
 	page, _, _, _ := env.object(t, "view/apple.html")
-	for _, want := range []string{`<a href="https://support.apple.com/en-us/122716">About the security content of macOS Sequoia 15.5</a>`, `<strong>Apple</strong>`, `href="android.html"`} {
+	for _, want := range []string{`<a href="https://support.apple.com/en-us/122716">About the security content of macOS Sequoia 15.5</a>`, `<strong aria-current="page">Apple</strong>`, `href="android.html"`} {
 		if !strings.Contains(page, want) {
 			t.Errorf("apple.html lacks %q", want)
 		}
@@ -230,7 +230,8 @@ func TestPageTitle(t *testing.T) {
 }
 
 // The Linux kernel view shows just its HIGH and CRITICAL CVEs, reading past
-// the first batch of the index to find them; Microsoft's shows them all.
+// the first batch of the index to find them; Microsoft's, Chrome's, Go's,
+// Apache's and OpenSSL's show them all.
 func TestHighOnlyVendorView(t *testing.T) {
 	env := newTestEnv(t)
 	env.s.viewSize = 2
@@ -260,7 +261,15 @@ func TestHighOnlyVendorView(t *testing.T) {
 	ms1, ms2 := ch("CVE-2026-2001"), ch("CVE-2026-2002")
 	files["cves/2026/2xxx/CVE-2026-2001.json"] = assigned("microsoft", fullRecord("CVE-2026-2001", "PUBLISHED", "Windows info disclosure", "d", medium, "2026-11-02T00:50:00Z"))
 	files["cves/2026/2xxx/CVE-2026-2002.json"] = assigned("microsoft", fullRecord("CVE-2026-2002", "PUBLISHED", "Windows EoP", "d", high, "2026-11-02T00:40:00Z"))
-	files["cves/deltaLog.json"] = deltaLog(delta{FetchTime: "2026-11-02T01:00:00.000Z", New: append(cs, ms1, ms2)})
+	chrome := ch("CVE-2026-3001")
+	files["cves/2026/3xxx/CVE-2026-3001.json"] = assigned("Chrome", fullRecord("CVE-2026-3001", "PUBLISHED", "Use after free in V8", "d", "[]", "2026-11-02T00:30:00Z"))
+	golang := ch("CVE-2026-4001")
+	files["cves/2026/4xxx/CVE-2026-4001.json"] = assigned("Go", fullRecord("CVE-2026-4001", "PUBLISHED", "Excessive memory use in net/http", "d", "[]", "2026-11-02T00:20:00Z"))
+	apache := ch("CVE-2026-5001")
+	files["cves/2026/5xxx/CVE-2026-5001.json"] = assigned("apache", fullRecord("CVE-2026-5001", "PUBLISHED", "Apache HTTP Server: mod_proxy request smuggling", "d", "[]", "2026-11-02T00:10:00Z"))
+	openssl := ch("CVE-2026-6001")
+	files["cves/2026/6xxx/CVE-2026-6001.json"] = assigned("openssl", fullRecord("CVE-2026-6001", "PUBLISHED", "Out-of-bounds read in X.509 name checking", "d", "[]", "2026-11-02T00:05:00Z"))
+	files["cves/deltaLog.json"] = deltaLog(delta{FetchTime: "2026-11-02T01:00:00.000Z", New: append(cs, ms1, ms2, chrome, golang, apache, openssl)})
 	env.gh.commit(sha1, files)
 	env.sync(t)
 
@@ -278,7 +287,31 @@ func TestHighOnlyVendorView(t *testing.T) {
 	if got := entryIDs(env.feedAt(t, "view/microsoft.xml")); strings.Join(got, " ") != "CVE-2026-2001 CVE-2026-2002" {
 		t.Fatalf("microsoft.xml: %v", got)
 	}
-	if index, _, _, _ := env.object(t, indexKey); !strings.Contains(index, `href="linux.html"`) || !strings.Contains(index, `href="microsoft.html"`) {
+	if got := entryIDs(env.feedAt(t, "view/chrome.xml")); strings.Join(got, " ") != "CVE-2026-3001" {
+		t.Fatalf("chrome.xml: %v", got)
+	}
+	if page, _, _, _ := env.object(t, "view/chrome.html"); !strings.Contains(page, "Use after free in V8") {
+		t.Error("chrome.html doesn't list Chrome's CVE")
+	}
+	if got := entryIDs(env.feedAt(t, "view/go.xml")); strings.Join(got, " ") != "CVE-2026-4001" {
+		t.Fatalf("go.xml: %v", got)
+	}
+	if page, _, _, _ := env.object(t, "view/go.html"); !strings.Contains(page, "Excessive memory use in net/http") {
+		t.Error("go.html doesn't list Go's CVE")
+	}
+	if got := entryIDs(env.feedAt(t, "view/apache.xml")); strings.Join(got, " ") != "CVE-2026-5001" {
+		t.Fatalf("apache.xml: %v", got)
+	}
+	if page, _, _, _ := env.object(t, "view/apache.html"); !strings.Contains(page, "mod_proxy request smuggling") {
+		t.Error("apache.html doesn't list Apache's CVE")
+	}
+	if got := entryIDs(env.feedAt(t, "view/openssl.xml")); strings.Join(got, " ") != "CVE-2026-6001" {
+		t.Fatalf("openssl.xml: %v", got)
+	}
+	if page, _, _, _ := env.object(t, "view/openssl.html"); !strings.Contains(page, "X.509 name checking") {
+		t.Error("openssl.html doesn't list OpenSSL's CVE")
+	}
+	if index, _, _, _ := env.object(t, indexKey); !strings.Contains(index, `href="linux.html"`) || !strings.Contains(index, `href="microsoft.html"`) || !strings.Contains(index, `href="chrome.html"`) || !strings.Contains(index, `href="go.html"`) || !strings.Contains(index, `href="apache.html"`) || !strings.Contains(index, `href="openssl.html"`) {
 		t.Error("index.html doesn't link the new vendor pages")
 	}
 }

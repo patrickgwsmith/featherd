@@ -16,20 +16,23 @@ import (
 
 // The views: the newest CVEs that deltaLog.json lists as new or updated,
 // and the newest of those rated HIGH or CRITICAL, each as a page and an
-// Atom feed. They're a projection of deltaLog.json at the commit synced and
-// the records in the bucket, so they're simply rewritten with plain PUTs
-// on each sync.
+// Atom feed. The home page, index.html, is the HIGH and CRITICAL one, and
+// all.html lists them all; high.html, the HIGH and CRITICAL page's old
+// address, is kept as a copy of index.html. They're a projection of
+// deltaLog.json at the commit synced and the records in the bucket, so
+// they're simply rewritten with plain PUTs on each sync.
 const (
-	indexKey    = "view/index.html"
-	feedKey     = "view/feed.xml"
+	indexKey    = "view/index.html" // HIGH and CRITICAL
+	allPageKey  = "view/all.html"
+	feedKey     = "view/feed.xml" // all
 	highPageKey = "view/high.html"
 	highFeedKey = "view/high.xml"
 )
 
-// highWindow bounds how far back in deltaLog.json the high view looks, so
-// a bucket missing most records (one never seeded) doesn't read all 30
-// days on every sync.
-const highWindow = 7 * 24 * time.Hour
+// highWindow bounds how far back in deltaLog.json the high view looks:
+// all of its 30 days, as a full high view of 500 CVEs can need more than
+// a week of entries.
+const highWindow = 30 * 24 * time.Hour
 
 // viewBatch is how many records are read back at once while scanning.
 const viewBatch = 64
@@ -132,13 +135,17 @@ func (v *viewScan) flush(ctx context.Context) error {
 // cvelistV5 hasn't moved: the vendor views also when their index was
 // just backfilled, or OSV changed.
 func (s *syncer) ensureView(ctx context.Context, commit string, osv map[string][]string, osvChanged, kevChanged bool, res *syncResult) error {
-	resp, err := s.s3.head(ctx, highFeedKey)
-	if err != nil {
-		return err
-	}
-	if resp.status != http.StatusOK {
-		if err := s.writeView(ctx, commit); err != nil {
+	// all.html too, as a bucket from before it was added lacks just that.
+	for _, key := range []string{highFeedKey, allPageKey} {
+		resp, err := s.s3.head(ctx, key)
+		if err != nil {
 			return err
+		}
+		if resp.status != http.StatusOK {
+			if err := s.writeView(ctx, commit); err != nil {
+				return err
+			}
+			break
 		}
 	}
 	backfilled, err := s.writeVendorIndexes(ctx, commit, newVendorChanges())
@@ -146,7 +153,7 @@ func (s *syncer) ensureView(ctx context.Context, commit string, osv map[string][
 		return err
 	}
 	// The last vendor's feed is written last.
-	resp, err = s.s3.head(ctx, vendors[len(vendors)-1].feedKey())
+	resp, err := s.s3.head(ctx, vendors[len(vendors)-1].feedKey())
 	if err != nil {
 		return err
 	}
@@ -192,32 +199,27 @@ func (s *syncer) writeView(ctx context.Context, commit string) error {
 	}
 
 	generated := s.now().UTC()
-	pages := []viewPage{
-		{
-			Commit: commit, Generated: generated, CVEs: v.all,
-			Title: "New and updated CVEs", About: "new or updated",
-			FeedID: "https://github.com/CVEProject/cvelistV5",
-			Page:   "./", Feed: "feed.xml",
-		},
-		{
-			Commit: commit, Generated: generated, CVEs: v.high,
-			Title: "New and updated HIGH and CRITICAL CVEs", About: "rated HIGH or CRITICAL and new or updated",
-			FeedID: "https://github.com/CVEProject/cvelistV5#high",
-			Page:   "high.html", Feed: "high.xml",
-		},
+	all := viewPage{
+		Commit: commit, Generated: generated, CVEs: v.all,
+		Title: "New and updated CVEs", About: "new or updated",
+		FeedID: "https://github.com/CVEProject/cvelistV5",
+		Page:   "all.html", Feed: "feed.xml",
 	}
-	keys := [][2]string{{indexKey, feedKey}, {highPageKey, highFeedKey}}
+	high := viewPage{
+		Commit: commit, Generated: generated, CVEs: v.high,
+		Title: "New and updated HIGH and CRITICAL CVEs", About: "rated HIGH or CRITICAL and new or updated",
+		FeedID: "https://github.com/CVEProject/cvelistV5#high",
+		Page:   "./", Feed: "high.xml",
+	}
+	if err := s.putView(ctx, all, feedKey, allPageKey); err != nil {
+		return err
+	}
 	// The high feed is written last: ensureView takes it as the whole view.
-	for i, page := range pages {
-		if err := s.putView(ctx, page, keys[i][0], keys[i][1]); err != nil {
-			return err
-		}
-	}
-	return nil
+	return s.putView(ctx, high, highFeedKey, indexKey, highPageKey)
 }
 
-// putView writes a view's page and its feed.
-func (s *syncer) putView(ctx context.Context, page viewPage, pageKey, feedKey string) error {
+// putView writes a view's page, to each of pageKeys, and then its feed.
+func (s *syncer) putView(ctx context.Context, page viewPage, feedKey string, pageKeys ...string) error {
 	sortByUpdated(page.CVEs)
 	page.Nav = viewNav
 	if page.Source == "" {
@@ -231,8 +233,10 @@ func (s *syncer) putView(ctx context.Context, page viewPage, pageKey, feedKey st
 	if err != nil {
 		return err
 	}
-	if _, err := s.s3.put(ctx, pageKey, "text/html; charset=utf-8", html.Bytes(), "", ""); err != nil {
-		return err
+	for _, key := range pageKeys {
+		if _, err := s.s3.put(ctx, key, "text/html; charset=utf-8", html.Bytes(), "", ""); err != nil {
+			return err
+		}
 	}
 	_, err = s.s3.put(ctx, feedKey, "application/atom+xml; charset=utf-8", feed, "", "")
 	return err
@@ -240,7 +244,7 @@ func (s *syncer) putView(ctx context.Context, page viewPage, pageKey, feedKey st
 
 // viewNav links every view from each page.
 var viewNav = func() []navLink {
-	nav := []navLink{{"./", "All"}, {"high.html", "HIGH and CRITICAL"}, {"kev.html", "Known exploited"}}
+	nav := []navLink{{"./", "HIGH and CRITICAL"}, {"all.html", "All"}, {"kev.html", "Known exploited"}}
 	for _, v := range vendors {
 		nav = append(nav, navLink{v.Name + ".html", v.Title})
 	}
@@ -571,8 +575,7 @@ var indexTemplate = template.Must(template.New("index").Funcs(template.FuncMap{
 		}
 		return t.UTC().Format("2 Jan 2006")
 	},
-	"snippet": func(s string) string { return truncate(s, 400) },
-	"short":   short,
+	"short": short,
 }).Parse(`<!doctype html>
 <html lang="en">
 <meta charset="utf-8">
@@ -580,7 +583,9 @@ var indexTemplate = template.Must(template.New("index").Funcs(template.FuncMap{
 <title>{{.Title}}</title>
 <link rel="alternate" type="application/atom+xml" title="{{.Title}}" href="{{.Feed}}">
 <style>
-body { font: 16px/1.5 system-ui, sans-serif; max-width: 46rem; margin: 2rem auto; padding: 0 1rem; color: #222; }
+body { font: 16px/1.5 system-ui, sans-serif; max-width: 70rem; margin: 2rem auto; padding: 0 1rem; color: #222; }
+.layout { display: grid; grid-template-columns: 11rem minmax(0, 1fr); gap: 2rem; }
+main { min-width: 0; }
 article { border-bottom: 1px solid #ddd; padding: 0.75rem 0; }
 h2 { font-size: 1.05rem; margin: 0; }
 a { color: #0645ad; text-decoration: none; }
@@ -596,26 +601,38 @@ a { color: #0645ad; text-decoration: none; }
 .medium { background: #fef3c7; color: #92400e; }
 .low, .none { background: #dcfce7; color: #166534; }
 p { margin: 0.25rem 0 0; }
-nav { font-size: 0.9rem; margin-bottom: 0.5rem; }
+summary { cursor: pointer; }
+summary h2 { display: inline; }
+details[open] summary { margin-bottom: 0.25rem; }
+nav { font-size: 0.9rem; align-self: start; position: sticky; top: 1rem; }
+nav a, nav strong { display: block; padding: 0.35rem 0.6rem; border-radius: 0.25rem; }
+nav strong { background: #e5e7eb; }
 .refs { font-size: 0.85rem; }
 footer { color: #888; font-size: 0.8rem; margin-top: 1rem; }
-@media (prefers-color-scheme: dark) { body { background: #111; color: #ddd; } a { color: #8ab4f8; } article { border-color: #333; } .tag { background: #333; color: #ccc; } }
+@media (max-width: 42rem) { .layout { display: block; } nav { position: static; display: flex; flex-wrap: wrap; gap: 0.25rem; margin-bottom: 1.5rem; } }
+@media (prefers-color-scheme: dark) { body { background: #111; color: #ddd; } a { color: #8ab4f8; } article { border-color: #333; } nav strong { background: #333; } .tag { background: #333; color: #ccc; } }
 </style>
+<div class="layout">
+<nav aria-label="CVE lists">{{range .Nav}}{{if eq .Href $.Page}}<strong aria-current="page">{{.Title}}</strong>{{else}}<a href="{{.Href}}">{{.Title}}</a>{{end}}{{end}}</nav>
+<main>
 <h1>{{.Title}}</h1>
-<nav>{{range $i, $n := .Nav}}{{if $i}} · {{end}}{{if eq $n.Href $.Page}}<strong>{{$n.Title}}</strong>{{else}}<a href="{{$n.Href}}">{{$n.Title}}</a>{{end}}{{end}}</nav>
 <p>The {{len .CVEs}} newest CVE records {{.About}} in <a href="{{.SourceURL}}">{{.Source}}</a>. Also as an <a href="{{.Feed}}">Atom feed</a>.</p>
 {{range .CVEs}}<article>
-<h2><a class="id" href="{{.Link}}">{{.ID}}</a> {{.Title}}</h2>
-<div class="meta">{{if .KEV}}<span class="tag kev">known exploited</span>{{if .KEV.Ransomware}} <span class="tag ransomware">ransomware</span>{{end}}{{else if .New}}<span class="tag new">new</span>{{else}}<span class="tag">updated</span>{{end}}
-{{- if .Rejected}} <span class="tag rejected">rejected</span>{{end}}
+<details><summary><h2><a class="id" href="{{.Link}}">{{.ID}}</a> {{.Title}}</h2>
 {{- if .Severity}} <span class="tag {{.Level}}">{{.Severity}}</span>{{end}}
+{{- if .KEV}} <span class="tag kev">known exploited</span>{{if .KEV.Ransomware}} <span class="tag ransomware">ransomware</span>{{end}}{{end}}</summary>
+<div class="meta">{{if .KEV}}added <time datetime="{{iso .KEV.Added}}">{{day .KEV.Added}}</time>{{if not .KEV.Due.IsZero}}, due {{day .KEV.Due}}{{end}}{{else if .New}}<span class="tag new">new</span>{{else}}<span class="tag">updated</span>{{end}}
+{{- if .Rejected}} <span class="tag rejected">rejected</span>{{end}}
 {{- with .Assigner}} · {{.}}{{end}}
-{{- if .KEV}}{{with .KEV.Product}} · {{.}}{{end}} · added <time datetime="{{iso .KEV.Added}}">{{day .KEV.Added}}</time>{{if not .KEV.Due.IsZero}}, due {{day .KEV.Due}}{{end}}
+{{- if .KEV}}{{with .KEV.Product}} · {{.}}{{end}}
 {{- else if not .Updated.IsZero}} · <time datetime="{{iso .Updated}}">{{date .Updated}}</time>{{end}}</div>
-{{with .Description}}<p>{{snippet .}}</p>{{end}}
+{{with .Description}}<p>{{.}}</p>{{end}}
 {{with .Refs}}<p class="refs">{{range $i, $r := .}}{{if $i}} · {{end}}<a href="{{$r.URL}}">{{$r.Title}}</a>{{end}}</p>{{end}}
+</details>
 </article>
 {{else}}<p>No CVEs yet.</p>
 {{end}}<footer>Built {{date .Generated}} from cvelistV5 at <span class="id">{{short .Commit}}</span> by cve-sync.</footer>
+</main>
+</div>
 </html>
 `))

@@ -40,14 +40,28 @@ type vendor struct {
 //
 // The Linux kernel CNA assigns about 25 CVEs a day and scores only about
 // 40% of them, all HIGH or CRITICAL, so its page shows just those; the
-// unscored rest would fill 100 entries in four days. Microsoft scores
+// unscored rest would fill 500 entries in three weeks. Microsoft scores
 // every CVE and publishes in monthly batches, three quarters of them
-// HIGH or CRITICAL, so its page shows them all.
+// HIGH or CRITICAL, so its page shows them all. Chrome's CNA assigns a few
+// hundred a year, each with its own severity in the description, and
+// leaves the CVSS score to CISA's ADP, so its page shows them all too.
+// Go's CNA covers the standard library, golang.org/x and the toolchain, a
+// few dozen a year, mostly unscored, so its page shows them all as well.
+// Apache's CNA covers every Apache Software Foundation project (httpd,
+// Tomcat, Struts, Kafka and the rest), several hundred a year, often rated
+// only in the description ("important", "moderate"), so its page shows
+// them all too. OpenSSL's CNA covers OpenSSL alone, a dozen or so a year,
+// each rated in its advisory (Low, Moderate, High) and often unscored, so
+// its page shows them all as well.
 var vendors = []vendor{
 	{Name: "apple", Assigner: "apple", Title: "Apple"},
 	{Name: "android", Assigner: "google_android", Title: "Android", OSV: true},
 	{Name: "linux", Assigner: "Linux", Title: "Linux kernel", HighOnly: true},
 	{Name: "microsoft", Assigner: "microsoft", Title: "Microsoft"},
+	{Name: "chrome", Assigner: "Chrome", Title: "Chrome"},
+	{Name: "go", Assigner: "Go", Title: "Go"},
+	{Name: "apache", Assigner: "apache", Title: "Apache"},
+	{Name: "openssl", Assigner: "openssl", Title: "OpenSSL"},
 }
 
 func vendorFor(assigner string) *vendor {
@@ -66,8 +80,8 @@ func (v vendor) feedKey() string  { return "view/" + v.Name + ".xml" }
 // vendorIndexMax bounds each index. Apple has assigned about 9,000 CVEs,
 // Android about 5,000, and the Linux kernel and Microsoft many more; the
 // views need only the newest -view of them, or for a HighOnly view, enough
-// to find that many HIGH and CRITICAL (about five weeks of Linux's).
-const vendorIndexMax = 1000
+// to find that many HIGH and CRITICAL (about 80 days of Linux's).
+const vendorIndexMax = 2000
 
 type indexEntry struct {
 	Updated  time.Time
@@ -606,7 +620,7 @@ func (s *syncer) writeVendorViews(ctx context.Context, commit string, changed ma
 			FeedID: "https://github.com/CVEProject/cvelistV5#" + vv.v.Name,
 			Page:   vv.v.Name + ".html", Feed: vv.v.Name + ".xml",
 		}
-		if err := s.putView(ctx, page, vv.v.pageKey(), vv.v.feedKey()); err != nil {
+		if err := s.putView(ctx, page, vv.v.feedKey(), vv.v.pageKey()); err != nil {
 			return err
 		}
 	}
