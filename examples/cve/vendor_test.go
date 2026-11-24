@@ -231,7 +231,7 @@ func TestPageTitle(t *testing.T) {
 
 // The Linux kernel view shows just its HIGH and CRITICAL CVEs, reading past
 // the first batch of the index to find them; Microsoft's, Chrome's, Go's,
-// Apache's and OpenSSL's show them all.
+// Apache's, OpenSSL's, SQLite's, nginx's and PostgreSQL's show them all.
 func TestHighOnlyVendorView(t *testing.T) {
 	env := newTestEnv(t)
 	env.s.viewSize = 2
@@ -269,7 +269,16 @@ func TestHighOnlyVendorView(t *testing.T) {
 	files["cves/2026/5xxx/CVE-2026-5001.json"] = assigned("apache", fullRecord("CVE-2026-5001", "PUBLISHED", "Apache HTTP Server: mod_proxy request smuggling", "d", "[]", "2026-11-02T00:10:00Z"))
 	openssl := ch("CVE-2026-6001")
 	files["cves/2026/6xxx/CVE-2026-6001.json"] = assigned("openssl", fullRecord("CVE-2026-6001", "PUBLISHED", "Out-of-bounds read in X.509 name checking", "d", "[]", "2026-11-02T00:05:00Z"))
-	files["cves/deltaLog.json"] = deltaLog(delta{FetchTime: "2026-11-02T01:00:00.000Z", New: append(cs, ms1, ms2, chrome, golang, apache, openssl)})
+	// SQLite's, from MITRE, says so only in its description; nginx's names
+	// F5's product in its affected entries.
+	sqlite := ch("CVE-2026-7001")
+	files["cves/2026/7xxx/CVE-2026-7001.json"] = assigned("mitre", fullRecord("CVE-2026-7001", "PUBLISHED", "", "In SQLite before 3.51.2, a crafted query can crash the shell.", "[]", "2026-11-02T00:04:00Z"))
+	nginx := ch("CVE-2026-8001")
+	files["cves/2026/8xxx/CVE-2026-8001.json"] = strings.Replace(assigned("f5", fullRecord("CVE-2026-8001", "PUBLISHED", "NGINX HTTP/3 QUIC vulnerability", "d", "[]", "2026-11-02T00:03:00Z")),
+		`"metrics":`, `"affected":[{"vendor":"F5","product":"NGINX Open Source"}],"metrics":`, 1)
+	postgres := ch("CVE-2026-9001")
+	files["cves/2026/9xxx/CVE-2026-9001.json"] = assigned("PostgreSQL", fullRecord("CVE-2026-9001", "PUBLISHED", "PostgreSQL row security bypass in MERGE", "d", "[]", "2026-11-02T00:02:00Z"))
+	files["cves/deltaLog.json"] = deltaLog(delta{FetchTime: "2026-11-02T01:00:00.000Z", New: append(cs, ms1, ms2, chrome, golang, apache, openssl, sqlite, nginx, postgres)})
 	env.gh.commit(sha1, files)
 	env.sync(t)
 
@@ -311,7 +320,75 @@ func TestHighOnlyVendorView(t *testing.T) {
 	if page, _, _, _ := env.object(t, "view/openssl.html"); !strings.Contains(page, "X.509 name checking") {
 		t.Error("openssl.html doesn't list OpenSSL's CVE")
 	}
-	if index, _, _, _ := env.object(t, indexKey); !strings.Contains(index, `href="linux.html"`) || !strings.Contains(index, `href="microsoft.html"`) || !strings.Contains(index, `href="chrome.html"`) || !strings.Contains(index, `href="go.html"`) || !strings.Contains(index, `href="apache.html"`) || !strings.Contains(index, `href="openssl.html"`) {
+	if got := entryIDs(env.feedAt(t, "view/sqlite.xml")); strings.Join(got, " ") != "CVE-2026-7001" {
+		t.Fatalf("sqlite.xml: %v", got)
+	}
+	if page, _, _, _ := env.object(t, "view/sqlite.html"); !strings.Contains(page, "crafted query can crash") || !strings.Contains(page, "affecting SQLite") {
+		t.Error("sqlite.html doesn't list SQLite's CVE as affecting SQLite")
+	}
+	if got := entryIDs(env.feedAt(t, "view/nginx.xml")); strings.Join(got, " ") != "CVE-2026-8001" {
+		t.Fatalf("nginx.xml: %v", got)
+	}
+	if page, _, _, _ := env.object(t, "view/nginx.html"); !strings.Contains(page, "HTTP/3 QUIC") {
+		t.Error("nginx.html doesn't list nginx's CVE")
+	}
+	if got := entryIDs(env.feedAt(t, "view/postgresql.xml")); strings.Join(got, " ") != "CVE-2026-9001" {
+		t.Fatalf("postgresql.xml: %v", got)
+	}
+	if page, _, _, _ := env.object(t, "view/postgresql.html"); !strings.Contains(page, "row security bypass in MERGE") {
+		t.Error("postgresql.html doesn't list PostgreSQL's CVE")
+	}
+	if index, _, _, _ := env.object(t, indexKey); !strings.Contains(index, `href="sqlite.html"`) || !strings.Contains(index, `href="nginx.html"`) {
+		t.Error("index.html doesn't link the product pages")
+	}
+	if index, _, _, _ := env.object(t, indexKey); !strings.Contains(index, `href="linux.html"`) || !strings.Contains(index, `href="microsoft.html"`) || !strings.Contains(index, `href="chrome.html"`) || !strings.Contains(index, `href="go.html"`) || !strings.Contains(index, `href="apache.html"`) || !strings.Contains(index, `href="openssl.html"`) || !strings.Contains(index, `href="postgresql.html"`) {
 		t.Error("index.html doesn't link the new vendor pages")
+	}
+}
+
+// The product views match a record's affected entries, the ADPs' CPEs, or
+// for a record whose CNA names nothing, its description; not tools merely
+// named for the product, nor a passing mention.
+func TestProductMatch(t *testing.T) {
+	rec := func(assigner, cna, adp string) string {
+		return fmt.Sprintf(`{"cveMetadata":{"cveId":"CVE-2026-1","assignerShortName":%q},"containers":{"cna":%s,"adp":[%s]}}`, assigner, cna, adp)
+	}
+	desc := func(affected, d string) string {
+		return fmt.Sprintf(`{"affected":%s,"descriptions":[{"lang":"en","value":%q}]}`, affected, d)
+	}
+	const na = `[{"vendor":"n/a","product":"n/a"}]`
+	for _, tc := range []struct {
+		name, data string
+		want       string // the product views it's in
+	}{
+		{"sqlite affected", rec("VulnCheck", desc(`[{"vendor":"SQLite","product":"SQLite"}]`, "d"), ""), "sqlite"},
+		{"sqlite cpe", rec("GitHub_M", desc(`[{"vendor":"x","product":"y"}]`, "d"), `{"affected":[{"cpes":["cpe:2.3:a:sqlite:sqlite:3.30.1:*:*:*:*:*:*:*"]}]}`), "sqlite"},
+		{"sqlite described", rec("mitre", desc(na, "SQLite 3.30.1 mishandles pExpr->y.pTab."), ""), "sqlite"},
+		{"sqlite through", rec("mitre", desc(`[]`, "pragma.c in SQLite through 3.30.1 mishandles NOT NULL."), ""), "sqlite"},
+		{"sqlite wrapper", rec("GitHub_M", desc(`[{"vendor":"sparklemotion","product":"sqlite3-ruby"}]`, "d"), ""), ""},
+		{"sqlite named elsewhere", rec("GitHub_M", desc(`[{"vendor":"acme","product":"app"}]`, "SQLite 3.30.1 is bundled."), ""), ""},
+		{"sqlite mentioned", rec("mitre", desc(na, "Stores passwords in a SQLite database."), ""), ""},
+		{"nginx plus", rec("f5", desc(`[{"vendor":"F5","product":"NGINX Plus"}]`, "d"), ""), "nginx"},
+		{"nginx controller", rec("f5", desc(`[{"vendor":"n/a","product":"NGINX Controller"}]`, "d"), ""), "nginx"},
+		{"nginx cpe", rec("f5", desc(`[]`, "d"), `{"affected":[{"cpes":["cpe:2.3:a:f5:nginx_plus:*:*:*:*:*:*:*:*"]}]}`), "nginx"},
+		{"nginx described", rec("redhat", desc(`[]`, "The resolver in nginx before 1.8.1 allows remote attackers..."), ""), "nginx"},
+		{"njs described", rec("mitre", desc(na, "Nginx NJS v0.7.2 was discovered to contain..."), ""), "nginx"},
+		{"nginx-ui", rec("GitHub_M", desc(`[{"vendor":"0xJacky","product":"nginx-ui"}]`, "d"), ""), ""},
+		{"ingress-nginx", rec("kubernetes", desc(`[{"vendor":"Kubernetes","product":"ingress-nginx"}]`, "d"), ""), ""},
+		{"proxy manager", rec("mitre", desc(na, "jc21 Nginx Proxy Manager before 2.0.13 allows traversal."), ""), ""},
+	} {
+		info, err := parseRecordInfo([]byte(tc.data))
+		if err != nil {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+		var got []string
+		for _, v := range vendorsFor(info) {
+			if v.Product != nil {
+				got = append(got, v.Name)
+			}
+		}
+		if strings.Join(got, " ") != tc.want {
+			t.Errorf("%s: in %q; want %q", tc.name, got, tc.want)
+		}
 	}
 }

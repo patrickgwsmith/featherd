@@ -25,9 +25,9 @@ cve-sync                    github.com / raw.githubusercontent.com      featherd
   │ GET C1/cves/deltaLog.json again ──▶│ until both views are full          │
   │   GET each CVE listed, newest first ──────────────────────────────────▶│ (read back for titles, severity)
   │ PUT view/all.html, feed.xml, index.html, high.html, high.xml ─────────▶│
-  │ PUT mut/vendor/{apple,android,linux,microsoft,chrome,go,apache,openssl} (those CNAs' records) ▶│
+  │ PUT mut/vendor/{apple,…,nginx,postgresql} (their records) ─────────────▶│
   │ GET support.apple.com, source.android.com pages cited ──▶ PUT refs/… ──▶│
-  │ PUT view/{apple,android,linux,microsoft,chrome,go,apache,openssl}.html and .xml ─────▶│
+  │ PUT view/{apple,…,nginx,postgresql}.html and .xml ────────────────────▶│
   │ PUT view/kev.html, kev.xml (the newest KEV copy, records read back) ──▶│
   │ PUT mut/sync commit=C1 fetch_time=T1   If-Match: E ───────────────────▶│ ← commit point
 ```
@@ -50,13 +50,16 @@ cve bucket  →  data/cve.sqlite3
 ├── view/go.html, view/go.xml                    Go's
 ├── view/apache.html, view/apache.xml            the Apache Software Foundation's
 ├── view/openssl.html, view/openssl.xml          OpenSSL's
+├── view/sqlite.html, view/sqlite.xml            those affecting SQLite
+├── view/nginx.html, view/nginx.xml              those affecting nginx
+├── view/postgresql.html, view/postgresql.xml    PostgreSQL's
 ├── view/kev.html, view/kev.xml                  the CVEs added to CISA KEV most recently
 ├── refs/support.apple.com/en-us/122716.html     an Apple security note, raw HTML as served
 ├── refs/source.android.com/docs/security/bulletin/2026/2026-06-01.html
 ├── refs/osv/Android/ASB-A-351830787.json        an OSV Android entry, as served
 ├── refs/www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json
 ├── refs/github.com/cisagov/kev-data/known_exploited_vulnerabilities.json
-├── mut/vendor/apple, …/apache, …/openssl   each vendor's records, newest first
+├── mut/vendor/apple, …/nginx, …/postgresql   each vendor's records, newest first
 ├── mut/osv/Android                              OSV's newest modified, ETag, and aliases
 ├── mut/kev                                      each KEV source's ETag or commit, and release
 └── mut/sync                                     the commit and newest delta synced
@@ -175,6 +178,27 @@ covers the OpenSSL library and tools only (BoringSSL's rare CVEs come
 from Google's CNA). It assigns a dozen or so a year, each rated Low,
 Moderate or High in its advisory and often without a CVSS score, so the
 view shows every one and 500 reach back many years.
+
+`view/sqlite.html` and `view/nginx.html` are products rather than CNAs:
+SQLite has none (MITRE assigns its CVEs among thousands of others) and
+nginx's come from F5's, along with BIG-IP's. So their views pick records
+by what they affect (`product.go`): an affected entry or CPE, the CNA's or
+an ADP's, naming the product, or for a record whose CNA names nothing
+("n/a", as in most of MITRE's), a description naming it with a version
+("SQLite before 3.32.3", "nginx 0.8.36"). SQLite's matches the library,
+its shell and extensions but not wrappers named for it (`sqlite3-ruby`);
+nginx's matches F5's NGINX products (Open Source, Plus, njs, Unit, the
+ingress controller and the rest) but not others' tools (`nginx-ui`, Nginx
+Proxy Manager, Kubernetes's `ingress-nginx`). Matched against the
+2026-11-02 snapshot, that's 78 SQLite CVEs and 160 nginx ones, so both
+views show every one. A CVE in a product that bundles SQLite and names
+only that product, such as Chrome's, isn't listed.
+
+`view/postgresql.html` lists the CVEs from PostgreSQL's own CNA
+(`PostgreSQL`): the server, libpq and its tools, a dozen or so a year
+(159 in the 2026-11-02 snapshot), so the view shows every one. MySQL's come
+from Oracle's CNA, in its quarterly Critical Patch Updates, and have no
+view of their own.
 
 - **An index per vendor.** `deltaLog.json` doesn't say who assigned a CVE,
   so `mut/vendor/<name>` lists each vendor's records, newest
@@ -345,7 +369,7 @@ once. Every run then does `cve-sync -once`. The views are published at `:8000/cv
 CRITICAL, with `:8000/cve/high.xml`; also at `:8000/cve/high.html`),
 `:8000/cve/all.html` (with `:8000/cve/feed.xml`), `:8000/cve/apple.html`,
 `:8000/cve/android.html`, `:8000/cve/linux.html`,
-`:8000/cve/microsoft.html`, `:8000/cve/chrome.html`, `:8000/cve/go.html`, `:8000/cve/apache.html`, `:8000/cve/openssl.html` and `:8000/cve/kev.html` (each with its `.xml`
+`:8000/cve/microsoft.html`, `:8000/cve/chrome.html`, `:8000/cve/go.html`, `:8000/cve/apache.html`, `:8000/cve/openssl.html`, `:8000/cve/sqlite.html`, `:8000/cve/nginx.html`, `:8000/cve/postgresql.html` and `:8000/cve/kev.html` (each with its `.xml`
 feed), and `mut/sync` at
 `:8000/cve/sync.txt`. The mirrored pages and KEV copies under `refs/` stay in the bucket;
 they're not published. Because the seed happens inside the first run, the

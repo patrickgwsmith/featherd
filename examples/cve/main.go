@@ -56,7 +56,10 @@ are mirrored as raw HTML under refs/. OSV's Android entries are mirrored
 to refs/osv/Android/. view/linux.html lists the Linux kernel's newest HIGH
 and CRITICAL CVEs, view/microsoft.html Microsoft's newest, and
 view/chrome.html Chrome's, view/go.html Go's, view/apache.html the
-Apache Software Foundation's and view/openssl.html OpenSSL's.
+Apache Software Foundation's, view/openssl.html OpenSSL's and
+view/postgresql.html PostgreSQL's;
+view/sqlite.html and view/nginx.html list those affecting SQLite and
+nginx, which have no CNA of their own, by the products records name.
 view/kev.html lists the CVEs added most recently to CISA's Known Exploited
 Vulnerabilities catalog, fetched from both cisa.gov and
 github.com/cisagov/kev-data, whichever released last, and each mirrored

@@ -18,6 +18,7 @@ import (
 )
 
 // The vendor views: the newest new or updated CVEs a vendor's CNA assigned,
+// or for a product without one, that affect it (product.go),
 // each linked to the vendor's security notes or bulletins they cite, which
 // are mirrored into the bucket under refs/.
 //
@@ -28,8 +29,11 @@ import (
 type vendor struct {
 	Name     string // view/<Name>.html and .xml, mut/vendor/<Name>
 	Assigner string // cveMetadata.assignerShortName
-	Title    string
-	OSV      bool // link the OSV Android entries that alias a CVE
+	// Product, if set, picks records by the product they affect rather
+	// than by Assigner, for a project without a CNA of its own.
+	Product *product
+	Title   string
+	OSV     bool // link the OSV Android entries that alias a CVE
 	// HighOnly shows just the HIGH and CRITICAL ones. The index still
 	// holds every record, so one scored later, by an update, joins.
 	HighOnly bool
@@ -53,6 +57,16 @@ type vendor struct {
 // them all too. OpenSSL's CNA covers OpenSSL alone, a dozen or so a year,
 // each rated in its advisory (Low, Moderate, High) and often unscored, so
 // its page shows them all as well.
+//
+// SQLite and nginx are products rather than CNAs (MITRE assigns SQLite's
+// CVEs among thousands of others, F5 nginx's along with BIG-IP's), so
+// their pages pick records by what they affect; each has a few dozen a
+// year at most, so both show them all.
+//
+// PostgreSQL has its own CNA, which assigns a dozen or so a year for the
+// server, libpq and its tools, so its page shows them all as well. It comes
+// last, after the product pages, so a bucket without its feed yet gets the
+// vendor views rewritten.
 var vendors = []vendor{
 	{Name: "apple", Assigner: "apple", Title: "Apple"},
 	{Name: "android", Assigner: "google_android", Title: "Android", OSV: true},
@@ -62,15 +76,34 @@ var vendors = []vendor{
 	{Name: "go", Assigner: "Go", Title: "Go"},
 	{Name: "apache", Assigner: "apache", Title: "Apache"},
 	{Name: "openssl", Assigner: "openssl", Title: "OpenSSL"},
+	{Name: "sqlite", Product: sqliteProduct, Title: "SQLite"},
+	{Name: "nginx", Product: nginxProduct, Title: "nginx"},
+	{Name: "postgresql", Assigner: "PostgreSQL", Title: "PostgreSQL"},
 }
 
-func vendorFor(assigner string) *vendor {
+// vendorsFor is the vendors whose views a record belongs in: the one
+// whose CNA assigned it, and any whose product it affects.
+func vendorsFor(info recordInfo) []*vendor {
+	var vs []*vendor
 	for i := range vendors {
-		if vendors[i].Assigner == assigner {
-			return &vendors[i]
+		v := &vendors[i]
+		if v.Product != nil && v.Product.matches(info) || v.Product == nil && v.Assigner == info.Assigner {
+			vs = append(vs, v)
 		}
 	}
-	return nil
+	return vs
+}
+
+// about completes "The N newest CVE records …" for the vendor's view.
+func (v vendor) about() string {
+	by := "assigned by " + v.Title
+	if v.Product != nil {
+		by = "affecting " + v.Title
+	}
+	if v.HighOnly {
+		return by + ", rated HIGH or CRITICAL, and new or updated"
+	}
+	return by + " and new or updated"
 }
 
 func (v vendor) indexKey() string { return "mut/vendor/" + v.Name }
@@ -137,6 +170,12 @@ type recordInfo struct {
 	ID, Assigner string
 	Updated      time.Time
 	Refs         []string // reference URLs, the CNA's then the ADPs'
+	// Affected is the vendor and product of each affected entry and CPE,
+	// the CNA's then the ADPs'. Unnamed is set if the CNA's name none
+	// ("n/a"), as in most MITRE records, whose Description says instead.
+	Affected    []vendorProduct
+	Unnamed     bool
+	Description string
 }
 
 func parseRecordInfo(data []byte) (recordInfo, error) {
@@ -144,6 +183,15 @@ func parseRecordInfo(data []byte) (recordInfo, error) {
 		References []struct {
 			URL string `json:"url"`
 		} `json:"references"`
+		Affected []struct {
+			Vendor  string   `json:"vendor"`
+			Product string   `json:"product"`
+			CPEs    []string `json:"cpes"`
+		} `json:"affected"`
+		Descriptions []struct {
+			Lang  string `json:"lang"`
+			Value string `json:"value"`
+		} `json:"descriptions"`
 	}
 	var rec struct {
 		CVEMetadata struct {
@@ -161,9 +209,30 @@ func parseRecordInfo(data []byte) (recordInfo, error) {
 	}
 	m := rec.CVEMetadata
 	info := recordInfo{ID: m.CVEID, Assigner: m.AssignerShortName, Updated: parseCVETime(m.DateUpdated)}
-	for _, c := range append([]refs{rec.Containers.CNA}, rec.Containers.ADP...) {
+	info.Unnamed = true
+	for i, c := range append([]refs{rec.Containers.CNA}, rec.Containers.ADP...) {
 		for _, r := range c.References {
 			info.Refs = append(info.Refs, r.URL)
+		}
+		for _, a := range c.Affected {
+			vp := newVendorProduct(a.Vendor, a.Product)
+			if i == 0 && (!unnamed(vp.Vendor) || !unnamed(vp.Product)) {
+				info.Unnamed = false
+			}
+			info.Affected = append(info.Affected, vp)
+			for _, cpe := range a.CPEs {
+				if vp, ok := cpeVendorProduct(cpe); ok {
+					info.Affected = append(info.Affected, vp)
+				}
+			}
+		}
+	}
+	for _, d := range rec.Containers.CNA.Descriptions {
+		if info.Description == "" || strings.HasPrefix(d.Lang, "en") {
+			info.Description = d.Value
+			if strings.HasPrefix(d.Lang, "en") {
+				break
+			}
 		}
 	}
 	return info, nil
@@ -191,13 +260,15 @@ func (vc *vendorChanges) add(path string, data []byte) {
 	if err != nil {
 		return
 	}
-	v := vendorFor(info.Assigner)
-	if v == nil || info.ID == "" {
+	vs := vendorsFor(info)
+	if len(vs) == 0 || info.ID == "" {
 		return
 	}
 	vc.mu.Lock()
 	defer vc.mu.Unlock()
-	vc.entries[v.Name] = append(vc.entries[v.Name], indexEntry{Updated: info.Updated, ID: info.ID, Path: path})
+	for _, v := range vs {
+		vc.entries[v.Name] = append(vc.entries[v.Name], indexEntry{Updated: info.Updated, ID: info.ID, Path: path})
+	}
 	for _, u := range info.Refs {
 		if key, fetch, ok := refKey(u); ok {
 			vc.refs[key] = fetch
@@ -609,10 +680,9 @@ func (s *syncer) writeVendorViews(ctx context.Context, commit string, changed ma
 				}
 			}
 		}
-		title, about := vv.v.Title+" CVEs", "assigned by "+vv.v.Title+" and new or updated"
+		title, about := vv.v.Title+" CVEs", vv.v.about()
 		if vv.v.HighOnly {
 			title = vv.v.Title + " HIGH and CRITICAL CVEs"
-			about = "assigned by " + vv.v.Title + ", rated HIGH or CRITICAL, and new or updated"
 		}
 		page := viewPage{
 			Commit: commit, Generated: generated, CVEs: vv.cves,
