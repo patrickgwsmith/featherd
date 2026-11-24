@@ -24,6 +24,7 @@ cve-sync                    github.com / raw.githubusercontent.com      featherd
   │   PUT cves/2026/120xxx/CVE-2026-120339.json ──────────────────────────▶│
   │ GET C1/cves/deltaLog.json again ──▶│ until both views are full          │
   │   GET each CVE listed, newest first ──────────────────────────────────▶│ (read back for titles, severity)
+  │ PUT mut/chart (CVEs published in the last 32 days) ───────────────────▶│
   │ PUT view/all.html, feed.xml, index.html, high.html, high.xml ─────────▶│
   │ PUT mut/vendor/{apple,…,nginx,postgresql} (their records) ─────────────▶│
   │ GET support.apple.com, source.android.com pages cited ──▶ PUT refs/… ──▶│
@@ -60,6 +61,7 @@ cve bucket  →  data/cve.sqlite3
 ├── refs/www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json
 ├── refs/github.com/cisagov/kev-data/known_exploited_vulnerabilities.json
 ├── mut/vendor/apple, …/nginx, …/postgresql   each vendor's records, newest first
+├── mut/chart                                    CVEs published in the last 32 days, for the charts
 ├── mut/osv/Android                              OSV's newest modified, ETag, and aliases
 ├── mut/kev                                      each KEV source's ETag or commit, and release
 └── mut/sync                                     the commit and newest delta synced
@@ -134,6 +136,41 @@ They're a projection, rewritten with plain `PUT`s on every sync:
   HIGH and CRITICAL.
 - The page is rendered with `html/template` and the feed with
   `encoding/xml`, so a record's text can't inject markup.
+
+## Charts
+
+Every page has a line chart above its list: how many CVEs were published
+on each of the last 30 full days (UTC), one line per severity (CRITICAL,
+HIGH, MEDIUM, LOW, unscored) plus their total. Today is left out, as its
+count isn't complete. A vendor page counts its own CVEs, and the home page
+and the Linux page only HIGH and CRITICAL; a severity with no CVEs gets no
+line, and with only one line, there's no total. `kev.html`'s chart is of
+the CVEs added to the catalog each day, from its `dateAdded`.
+
+- **Inline SVG.** Each chart is drawn in Go when the page is written, so
+  the pages stay static HTML, with no script. Hovering over a day shows its
+  counts, and the legend gives each line's 30-day total as text, so Find
+  sees it. Light and dark styles follow the tags' colours.
+- **Its own index.** The pages list the newest *new or updated* CVEs, which
+  for `all.html` is about a day's worth, so the charts aren't counted from
+  them. `mut/chart` has one line per CVE published in the last 32 days:
+  `datePublished`, ID, severity and the vendor pages it's on.
+
+  ```
+  2026-11-23T09:00:00Z CVE-2026-0001 critical apple
+  2026-11-20T09:00:00Z CVE-2026-0002 - linux
+  ```
+
+  Each sync merges in the records it stored before writing the views, so a
+  CVE scored later, often by CISA's ADP, moves to its new severity rather
+  than counting twice, and a rejected CVE drops out. Entries older than 32
+  days are dropped.
+- **Built once.** A seed builds `mut/chart` from the snapshot. A bucket
+  without one, such as one from before the charts, has it backfilled once
+  from the records `deltaLog.json` lists as new, which are the CVEs
+  published in its 30 days, and then every page is rewritten. A vendor page
+  added later only counts CVEs stored after it; delete `mut/chart` to
+  rebuild it.
 
 ## Vendor views and pages
 

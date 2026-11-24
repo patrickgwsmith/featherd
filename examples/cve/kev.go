@@ -332,8 +332,10 @@ func (s *syncer) writeKEVView(ctx context.Context, commit string) error {
 		}
 		c.Refs = kevRefs(e.Notes)
 	}
+	generated := s.now().UTC()
 	page := viewPage{
-		Commit: commit, Generated: s.now().UTC(), CVEs: cves,
+		Commit: commit, Generated: generated, CVEs: cves,
+		Chart:  kevChart(cat.Vulnerabilities, generated),
 		Title:  "Known exploited CVEs",
 		About:  "most recently added to CISA's Known Exploited Vulnerabilities catalog " + cat.CatalogVersion,
 		Source: "CISA KEV", SourceURL: "https://www.cisa.gov/known-exploited-vulnerabilities-catalog",

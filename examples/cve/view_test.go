@@ -159,9 +159,10 @@ func TestEnsureView(t *testing.T) {
 			t.Fatalf("sync: %+v", res)
 		}
 	}
-	// Once for the views and once to backfill the vendor indexes.
-	if n := env.gh.fetched["cves/deltaLog.json"]; n != 2 {
-		t.Fatalf("deltaLog fetched %d times; want 2", n)
+	// Once each to backfill the chart and vendor indexes, and once for the
+	// views.
+	if n := env.gh.fetched["cves/deltaLog.json"]; n != 3 {
+		t.Fatalf("deltaLog fetched %d times; want 3", n)
 	}
 	if got := env.feed(t).Entries; len(got) != 1 || got[0].Title != "CVE-2026-0001: a" {
 		t.Fatalf("view: %+v", got)
@@ -329,10 +330,13 @@ func TestPageDetails(t *testing.T) {
 		t.Fatal(err)
 	}
 	page := b.String()
-	if !strings.Contains(page, `<details><summary><h2><a class="id" href="https://www.cve.org/CVERecord?id=CVE-2026-0001">CVE-2026-0001</a> Overflow in thing</h2></summary>`) {
+	if !strings.Contains(page, `<details><summary><h2><span class="id">CVE-2026-0001</span> Overflow in thing</h2></summary>`) {
 		t.Errorf("summary is not just the title:\n%s", page)
 	}
-	if !strings.Contains(page, `CVE-2026-0002</a> Bypass in other</h2> <span class="tag critical">CRITICAL 9.8 (CVSS 3.1)</span> <span class="tag kev">known exploited</span> <span class="tag ransomware">ransomware</span></summary>`) {
+	if !strings.Contains(page, `<p class="refs"><a href="https://www.cve.org/CVERecord?id=CVE-2026-0001">CVE-2026-0001 on cve.org</a></p>`) {
+		t.Errorf("cve.org link not in details:\n%s", page)
+	}
+	if !strings.Contains(page, `CVE-2026-0002</span> Bypass in other</h2> <span class="tag critical">CRITICAL 9.8 (CVSS 3.1)</span> <span class="tag kev">known exploited</span> <span class="tag ransomware">ransomware</span></summary>`) {
 		t.Errorf("severity and known exploited not in summary:\n%s", page)
 	}
 	if !strings.Contains(page, "<p>"+long+"</p>") || strings.Contains(page, "…") {

@@ -63,7 +63,9 @@ nginx, which have no CNA of their own, by the products records name.
 view/kev.html lists the CVEs added most recently to CISA's Known Exploited
 Vulnerabilities catalog, fetched from both cisa.gov and
 github.com/cisagov/kev-data, whichever released last, and each mirrored
-raw under refs/.
+raw under refs/. Each page has a line chart of the CVEs published on each
+of the last 30 days, by severity (kev.html's, of those added to the
+catalog), counted from mut/chart.
 
 Environment:
   FEATHERD               featherd's URL (default http://127.0.0.1:8333)

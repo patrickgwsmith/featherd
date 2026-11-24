@@ -186,10 +186,15 @@ func (s *syncer) sync(ctx context.Context) (syncResult, error) {
 	sort.Strings(sorted)
 
 	vc := newVendorChanges()
+	vc.chartSince = s.now().Add(-chartKeep)
 	stored, missing, err := s.storeAll(ctx, head, sorted, vc)
 	res.Stored, res.Missing = stored, missing
 	if err != nil {
 		// The state isn't moved, so the next run repeats these deltas.
+		return res, err
+	}
+	// The chart index is written before the views, which draw from it.
+	if _, err := s.writeChartIndex(ctx, head, vc); err != nil {
 		return res, err
 	}
 	// The view is written after the records, so it reads back their

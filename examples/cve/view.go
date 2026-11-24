@@ -135,13 +135,19 @@ func (v *viewScan) flush(ctx context.Context) error {
 // cvelistV5 hasn't moved: the vendor views also when their index was
 // just backfilled, or OSV changed.
 func (s *syncer) ensureView(ctx context.Context, commit string, osv map[string][]string, osvChanged, kevChanged bool, res *syncResult) error {
+	// A bucket from before the charts has no chart index, and once it's
+	// backfilled, every page is rewritten to draw its chart.
+	charted, err := s.writeChartIndex(ctx, commit, newVendorChanges())
+	if err != nil {
+		return err
+	}
 	// all.html too, as a bucket from before it was added lacks just that.
 	for _, key := range []string{highFeedKey, allPageKey} {
 		resp, err := s.s3.head(ctx, key)
 		if err != nil {
 			return err
 		}
-		if resp.status != http.StatusOK {
+		if charted || resp.status != http.StatusOK {
 			if err := s.writeView(ctx, commit); err != nil {
 				return err
 			}
@@ -157,7 +163,7 @@ func (s *syncer) ensureView(ctx context.Context, commit string, osv map[string][
 	if err != nil {
 		return err
 	}
-	if backfilled || osvChanged || resp.status != http.StatusOK {
+	if charted || backfilled || osvChanged || resp.status != http.StatusOK {
 		if err := s.writeVendorViews(ctx, commit, nil, osv, res); err != nil {
 			return err
 		}
@@ -165,7 +171,7 @@ func (s *syncer) ensureView(ctx context.Context, commit string, osv map[string][
 	if resp, err = s.s3.head(ctx, kevFeedKey); err != nil {
 		return err
 	}
-	if kevChanged || resp.status != http.StatusOK {
+	if charted || kevChanged || resp.status != http.StatusOK {
 		return s.writeKEVView(ctx, commit)
 	}
 	return nil
@@ -198,18 +204,24 @@ func (s *syncer) writeView(ctx context.Context, commit string) error {
 		return err
 	}
 
+	chart, err := s.loadChart(ctx)
+	if err != nil {
+		return err
+	}
 	generated := s.now().UTC()
 	all := viewPage{
 		Commit: commit, Generated: generated, CVEs: v.all,
 		Title: "New and updated CVEs", About: "new or updated",
 		FeedID: "https://github.com/CVEProject/cvelistV5",
 		Page:   "all.html", Feed: "feed.xml",
+		Chart: severityChart("CVEs published each day", chart, generated, func(chartEntry) bool { return true }),
 	}
 	high := viewPage{
 		Commit: commit, Generated: generated, CVEs: v.high,
 		Title: "New and updated HIGH and CRITICAL CVEs", About: "rated HIGH or CRITICAL and new or updated",
 		FeedID: "https://github.com/CVEProject/cvelistV5#high",
 		Page:   "./", Feed: "high.xml",
+		Chart: severityChart("HIGH and CRITICAL CVEs published each day", chart, generated, chartEntry.high),
 	}
 	if err := s.putView(ctx, all, feedKey, allPageKey); err != nil {
 		return err
@@ -274,6 +286,7 @@ type viewPage struct {
 	FeedID            string
 	Page, Feed        string // relative links to this page and its feed
 	Nav               []navLink
+	Chart             *chartData // drawn above the list, if set
 }
 
 // viewCVE is what the view shows of one record.
@@ -592,7 +605,6 @@ a { color: #0645ad; text-decoration: none; }
 .id { font-family: ui-monospace, monospace; white-space: nowrap; }
 .meta { color: #666; font-size: 0.85rem; }
 .tag { display: inline-block; font-size: 0.75rem; padding: 0 0.4em; border-radius: 0.25rem; background: #eee; color: #444; }
-.new { background: #dbeafe; color: #1e40af; }
 .kev, .ransomware { background: #ede9fe; color: #5b21b6; }
 .ransomware { background: #1f2937; color: #fff; }
 .rejected { background: #e5e7eb; color: #6b7280; text-decoration: line-through; }
@@ -608,26 +620,40 @@ nav { font-size: 0.9rem; align-self: start; position: sticky; top: 1rem; }
 nav a, nav strong { display: block; padding: 0.35rem 0.6rem; border-radius: 0.25rem; }
 nav strong { background: #e5e7eb; }
 .refs { font-size: 0.85rem; }
+.chart { margin: 1rem 0 1.25rem; }
+.chart figcaption { color: #666; font-size: 0.85rem; }
+.chart svg { display: block; width: 100%; height: auto; }
+.chart polyline { fill: none; stroke-width: 2; stroke-linejoin: round; }
+.chart .grid { stroke: #e5e7eb; }
+.chart .axis { fill: #888; font-size: 11px; }
+.chart .day { fill: transparent; }
+.chart .day:hover { fill: rgba(127, 127, 127, 0.12); }
+.legend { list-style: none; margin: 0.25rem 0 0; padding: 0; display: flex; flex-wrap: wrap; gap: 0.25rem 1rem; font-size: 0.85rem; }
+.legend .key { display: inline-block; width: 0.9em; height: 0.2em; margin-right: 0.35em; vertical-align: middle; background: currentColor; }
+.s-total { stroke: #222; color: #222; } .s-critical { stroke: #7f1d1d; color: #7f1d1d; } .s-high { stroke: #dc2626; color: #dc2626; }
+.s-medium { stroke: #d97706; color: #d97706; } .s-low { stroke: #16a34a; color: #16a34a; } .s-unscored { stroke: #9ca3af; color: #9ca3af; } .s-kev { stroke: #6d28d9; color: #6d28d9; }
+.legend li { color: inherit; }
 footer { color: #888; font-size: 0.8rem; margin-top: 1rem; }
 @media (max-width: 42rem) { .layout { display: block; } nav { position: static; display: flex; flex-wrap: wrap; gap: 0.25rem; margin-bottom: 1.5rem; } }
-@media (prefers-color-scheme: dark) { body { background: #111; color: #ddd; } a { color: #8ab4f8; } article { border-color: #333; } nav strong { background: #333; } .tag { background: #333; color: #ccc; } }
+@media (prefers-color-scheme: dark) { body { background: #111; color: #ddd; } a { color: #8ab4f8; } article { border-color: #333; } nav strong { background: #333; } .tag { background: #333; color: #ccc; } .chart .grid { stroke: #333; } .s-total { stroke: #ddd; color: #ddd; } .s-critical { stroke: #f87171; color: #f87171; } .s-kev { stroke: #a78bfa; color: #a78bfa; } }
 </style>
 <div class="layout">
 <nav aria-label="CVE lists">{{range .Nav}}{{if eq .Href $.Page}}<strong aria-current="page">{{.Title}}</strong>{{else}}<a href="{{.Href}}">{{.Title}}</a>{{end}}{{end}}</nav>
 <main>
 <h1>{{.Title}}</h1>
 <p>The {{len .CVEs}} newest CVE records {{.About}} in <a href="{{.SourceURL}}">{{.Source}}</a>. Also as an <a href="{{.Feed}}">Atom feed</a>.</p>
-{{range .CVEs}}<article>
-<details><summary><h2><a class="id" href="{{.Link}}">{{.ID}}</a> {{.Title}}</h2>
+{{with .Chart}}{{.HTML}}
+{{end}}{{range .CVEs}}<article>
+<details><summary><h2><span class="id">{{.ID}}</span> {{.Title}}</h2>
 {{- if .Severity}} <span class="tag {{.Level}}">{{.Severity}}</span>{{end}}
 {{- if .KEV}} <span class="tag kev">known exploited</span>{{if .KEV.Ransomware}} <span class="tag ransomware">ransomware</span>{{end}}{{end}}</summary>
-<div class="meta">{{if .KEV}}added <time datetime="{{iso .KEV.Added}}">{{day .KEV.Added}}</time>{{if not .KEV.Due.IsZero}}, due {{day .KEV.Due}}{{end}}{{else if .New}}<span class="tag new">new</span>{{else}}<span class="tag">updated</span>{{end}}
+<div class="meta">{{if .KEV}}added <time datetime="{{iso .KEV.Added}}">{{day .KEV.Added}}</time>{{if not .KEV.Due.IsZero}}, due {{day .KEV.Due}}{{end}}{{else if .New}}new{{else}}updated{{end}}
 {{- if .Rejected}} <span class="tag rejected">rejected</span>{{end}}
 {{- with .Assigner}} · {{.}}{{end}}
 {{- if .KEV}}{{with .KEV.Product}} · {{.}}{{end}}
 {{- else if not .Updated.IsZero}} · <time datetime="{{iso .Updated}}">{{date .Updated}}</time>{{end}}</div>
 {{with .Description}}<p>{{.}}</p>{{end}}
-{{with .Refs}}<p class="refs">{{range $i, $r := .}}{{if $i}} · {{end}}<a href="{{$r.URL}}">{{$r.Title}}</a>{{end}}</p>{{end}}
+<p class="refs"><a href="{{.Link}}">{{.ID}} on cve.org</a>{{range .Refs}} · <a href="{{.URL}}">{{.Title}}</a>{{end}}</p>
 </details>
 </article>
 {{else}}<p>No CVEs yet.</p>

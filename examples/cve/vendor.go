@@ -169,6 +169,8 @@ func mergeIndex(old, add []indexEntry) []indexEntry {
 type recordInfo struct {
 	ID, Assigner string
 	Updated      time.Time
+	Published    time.Time
+	Rejected     bool
 	Refs         []string // reference URLs, the CNA's then the ADPs'
 	// Affected is the vendor and product of each affected entry and CPE,
 	// the CNA's then the ADPs'. Unnamed is set if the CNA's name none
@@ -196,7 +198,9 @@ func parseRecordInfo(data []byte) (recordInfo, error) {
 	var rec struct {
 		CVEMetadata struct {
 			CVEID             string `json:"cveId"`
+			State             string `json:"state"`
 			AssignerShortName string `json:"assignerShortName"`
+			DatePublished     string `json:"datePublished"`
 			DateUpdated       string `json:"dateUpdated"`
 		} `json:"cveMetadata"`
 		Containers struct {
@@ -208,7 +212,10 @@ func parseRecordInfo(data []byte) (recordInfo, error) {
 		return recordInfo{}, err
 	}
 	m := rec.CVEMetadata
-	info := recordInfo{ID: m.CVEID, Assigner: m.AssignerShortName, Updated: parseCVETime(m.DateUpdated)}
+	info := recordInfo{
+		ID: m.CVEID, Assigner: m.AssignerShortName, Updated: parseCVETime(m.DateUpdated),
+		Published: parseCVETime(m.DatePublished), Rejected: m.State == "REJECTED",
+	}
 	info.Unnamed = true
 	for i, c := range append([]refs{rec.Containers.CNA}, rec.Containers.ADP...) {
 		for _, r := range c.References {
@@ -239,19 +246,23 @@ func parseRecordInfo(data []byte) (recordInfo, error) {
 }
 
 // vendorChanges collects the vendors' records stored by a sync or seed,
-// and the pages they cite.
+// and the pages they cite, and the entries for the chart index.
 type vendorChanges struct {
 	mu      sync.Mutex
 	entries map[string][]indexEntry // vendor name → its records stored
 	refs    map[string]string       // refs/ key → URL, cited by those
+	chart   map[string]chartEntry   // CVE ID → its chart entry
+	// chartSince leaves out of chart the CVEs published before it.
+	chartSince time.Time
 }
 
 func newVendorChanges() *vendorChanges {
-	return &vendorChanges{entries: map[string][]indexEntry{}, refs: map[string]string{}}
+	return &vendorChanges{entries: map[string][]indexEntry{}, refs: map[string]string{}, chart: map[string]chartEntry{}}
 }
 
-// add notes a stored record if a vendor assigned it. It's safe for
-// concurrent use; a nil vendorChanges ignores everything.
+// add notes a stored record if a vendor assigned it, and if it's in the
+// chart's days. It's safe for concurrent use; a nil vendorChanges ignores
+// everything.
 func (vc *vendorChanges) add(path string, data []byte) {
 	if vc == nil {
 		return
@@ -260,12 +271,16 @@ func (vc *vendorChanges) add(path string, data []byte) {
 	if err != nil {
 		return
 	}
+	ce := chartChange(info, data, vc.chartSince)
 	vs := vendorsFor(info)
+	vc.mu.Lock()
+	defer vc.mu.Unlock()
+	if ce != nil {
+		vc.chart[ce.ID] = *ce
+	}
 	if len(vs) == 0 || info.ID == "" {
 		return
 	}
-	vc.mu.Lock()
-	defer vc.mu.Unlock()
 	for _, v := range vs {
 		vc.entries[v.Name] = append(vc.entries[v.Name], indexEntry{Updated: info.Updated, ID: info.ID, Path: path})
 	}
@@ -663,6 +678,10 @@ func (s *syncer) writeVendorViews(ctx context.Context, commit string, changed ma
 		return err
 	}
 
+	chart, err := s.loadChart(ctx)
+	if err != nil {
+		return err
+	}
 	generated := s.now().UTC()
 	for _, vv := range views {
 		for i := range vv.cves {
@@ -690,6 +709,12 @@ func (s *syncer) writeVendorViews(ctx context.Context, commit string, changed ma
 			FeedID: "https://github.com/CVEProject/cvelistV5#" + vv.v.Name,
 			Page:   vv.v.Name + ".html", Feed: vv.v.Name + ".xml",
 		}
+		caption, keep := vv.v.Title+" CVEs published each day", onPage(vv.v.Name)
+		if vv.v.HighOnly {
+			caption = vv.v.Title + " HIGH and CRITICAL CVEs published each day"
+			keep = func(e chartEntry) bool { return e.high() && onPage(vv.v.Name)(e) }
+		}
+		page.Chart = severityChart(caption, chart, generated, keep)
 		if err := s.putView(ctx, page, vv.v.feedKey(), vv.v.pageKey()); err != nil {
 			return err
 		}

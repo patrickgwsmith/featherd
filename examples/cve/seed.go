@@ -75,6 +75,7 @@ func (s *syncer) seed(ctx context.Context, zipPath string) (seedResult, error) {
 	sort.Slice(files, func(i, j int) bool { return files[i].Name < files[j].Name })
 
 	vc := newVendorChanges()
+	vc.chartSince = s.now().Add(-chartKeep)
 	newest, err := s.storeZipped(ctx, files, vc)
 	if err != nil {
 		// No state is written, so the seed can simply be run again.
@@ -83,6 +84,9 @@ func (s *syncer) seed(ctx context.Context, zipPath string) (seedResult, error) {
 	// Every record was just stored, so the vendor indexes are built from
 	// them, not backfilled; the pages they cite are fetched by the views.
 	if _, err := s.writeVendorIndexes(ctx, "", vc); err != nil {
+		return res, err
+	}
+	if _, err := s.writeChartIndex(ctx, "", vc); err != nil {
 		return res, err
 	}
 	res.Stored = len(files)
